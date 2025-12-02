@@ -84,13 +84,23 @@ function RecordingControl() {
 		}, 10000);
 
 	const startRecording = useCallback(async () => {
+		console.log("startRecording called", { serverUrl });
 		const currentClient = clientRef.current;
 		const state = useRecordingStore.getState();
-		if (state.isRecording || !currentClient || !serverUrl) return;
+		if (state.isRecording || !currentClient || !serverUrl) {
+			console.log("startRecording aborted", {
+				isRecording: state.isRecording,
+				hasClient: !!currentClient,
+				hasServerUrl: !!serverUrl,
+			});
+			return;
+		}
 
 		setRecording(true);
 		try {
+			console.log("Connecting to server:", serverUrl);
 			await currentClient.connect({ wsUrl: serverUrl });
+			console.log("Connected successfully");
 		} catch (error) {
 			console.error("Failed to connect:", error);
 			setRecording(false);
@@ -118,10 +128,12 @@ function RecordingControl() {
 
 	// Effect events for stable handlers - always have access to latest values
 	const onStartRecordingEvent = useEffectEvent(() => {
+		console.log("recording-start event received");
 		startRecording();
 	});
 
 	const onStopRecordingEvent = useEffectEvent(() => {
+		console.log("recording-stop event received");
 		stopRecording();
 	});
 
@@ -131,8 +143,10 @@ function RecordingControl() {
 		let unlistenStop: (() => void) | undefined;
 
 		const setup = async () => {
+			console.log("Setting up event listeners...");
 			unlistenStart = await tauriAPI.onStartRecording(onStartRecordingEvent);
 			unlistenStop = await tauriAPI.onStopRecording(onStopRecordingEvent);
+			console.log("Event listeners set up successfully");
 		};
 
 		setup();
@@ -207,7 +221,13 @@ function RecordingControl() {
 	return (
 		<div
 			ref={containerRef}
-			style={{ width: "fit-content", height: "fit-content" }}
+			style={{
+				width: "fit-content",
+				height: "fit-content",
+				backgroundColor: "rgba(0, 0, 0, 0.9)",
+				borderRadius: 12,
+				padding: 4,
+			}}
 		>
 			<UserAudioComponent
 				onClick={handleClick}
@@ -269,7 +289,15 @@ export default function OverlayApp() {
 	// Show loading state while initializing
 	if (!client || !devicesReady) {
 		return (
-			<div className="flex items-center justify-center w-full h-full">
+			<div
+				className="flex items-center justify-center"
+				style={{
+					width: 48,
+					height: 48,
+					backgroundColor: "rgba(0, 0, 0, 0.9)",
+					borderRadius: 12,
+				}}
+			>
 				<Loader size="sm" color="white" />
 			</div>
 		);

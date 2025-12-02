@@ -40,17 +40,7 @@ function Sidebar({
 					active={activeView === "home"}
 					onClick={() => onViewChange("home")}
 					variant="filled"
-					styles={{
-						root: {
-							borderRadius: 8,
-							"&[dataActive]": {
-								backgroundColor: "var(--bg-elevated)",
-							},
-						},
-						label: {
-							color: "var(--text-primary)",
-						},
-					}}
+					className="sidebar-nav-link"
 				/>
 				<NavLink
 					label="Settings"
@@ -58,17 +48,7 @@ function Sidebar({
 					active={activeView === "settings"}
 					onClick={() => onViewChange("settings")}
 					variant="filled"
-					styles={{
-						root: {
-							borderRadius: 8,
-							"&[dataActive]": {
-								backgroundColor: "var(--bg-elevated)",
-							},
-						},
-						label: {
-							color: "var(--text-primary)",
-						},
-					}}
+					className="sidebar-nav-link"
 				/>
 			</nav>
 

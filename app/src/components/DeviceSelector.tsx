@@ -98,43 +98,7 @@ export function DeviceSelector() {
 			value={settings?.selected_mic_id ?? "default"}
 			onChange={handleChange}
 			allowDeselect={false}
-			styles={{
-				root: {
-					"--input-bg": "#1a1a1a",
-					"--input-bd": "#2a2a2a",
-				},
-				label: {
-					color: "var(--text-primary)",
-					fontWeight: 500,
-					marginBottom: 4,
-				},
-				description: {
-					color: "var(--text-muted)",
-					marginBottom: 8,
-				},
-				input: {
-					backgroundColor: "var(--bg-elevated)",
-					borderColor: "var(--border-default)",
-					color: "var(--text-primary)",
-					"&:focus": {
-						borderColor: "var(--accent-primary)",
-					},
-				},
-				dropdown: {
-					backgroundColor: "var(--bg-card)",
-					borderColor: "var(--border-default)",
-				},
-				option: {
-					color: "var(--text-primary)",
-					"&[data-selected]": {
-						backgroundColor: "var(--accent-primary)",
-						color: "#000",
-					},
-					"&[data-hovered]": {
-						backgroundColor: "var(--bg-elevated)",
-					},
-				},
-			}}
+			className="device-selector"
 		/>
 	);
 }

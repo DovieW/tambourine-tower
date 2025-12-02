@@ -100,6 +100,15 @@ body {
 	padding: 0 12px;
 }
 
+.sidebar-nav-link {
+	border-radius: 8px;
+	color: var(--text-primary);
+}
+
+.sidebar-nav-link[data-active] {
+	background-color: var(--bg-elevated);
+}
+
 .sidebar-footer {
 	padding: 16px 20px;
 	border-top: 1px solid var(--border-subtle);
@@ -394,6 +403,51 @@ body {
 	font-size: 12px;
 	color: var(--text-muted);
 	margin-left: auto;
+}
+
+/* Device Selector */
+.device-selector {
+	--input-bg: #1a1a1a;
+	--input-bd: #2a2a2a;
+}
+
+.device-selector label {
+	color: var(--text-primary);
+	font-weight: 500;
+	margin-bottom: 4px;
+}
+
+.device-selector .mantine-Select-description {
+	color: var(--text-muted);
+	margin-bottom: 8px;
+}
+
+.device-selector .mantine-Select-input {
+	background-color: var(--bg-elevated);
+	border-color: var(--border-default);
+	color: var(--text-primary);
+}
+
+.device-selector .mantine-Select-input:focus {
+	border-color: var(--accent-primary);
+}
+
+.device-selector .mantine-Select-dropdown {
+	background-color: var(--bg-card);
+	border-color: var(--border-default);
+}
+
+.device-selector .mantine-Select-option {
+	color: var(--text-primary);
+}
+
+.device-selector .mantine-Select-option[data-selected] {
+	background-color: var(--accent-primary);
+	color: #000;
+}
+
+.device-selector .mantine-Select-option[data-hovered] {
+	background-color: var(--bg-elevated);
 }
 
 /* Animations */
