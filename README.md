@@ -11,6 +11,14 @@ Open-source alternative to [Wispr Flow](https://wisprflow.ai) and [Superwhisper]
 > ⚠️ **Build in Progress**
 > This project is under active development. Core features work well, but expect breaking changes to the code, architecture, and configuration as the project evolves.
 
+<p align="center">
+  <img src="assets/home.png" alt="Home" width="600">
+</p>
+
+<p align="center">
+  <img src="assets/settings.png" alt="Settings" width="600">
+</p>
+
 ## Why?
 
 **Your voice, any app.** Tambourine gives you a universal voice interface that works everywhere: emails, messages, documents, code editors, terminals. Press a hotkey, speak, and your words are typed at your cursor. No copy-pasting, no app switching, no limitations.
