@@ -19,6 +19,10 @@ Open-source alternative to [Wispr Flow](https://wisprflow.ai) and [Superwhisper]
   <img src="assets/settings.png" alt="Settings" width="600">
 </p>
 
+<p align="center">
+  <img src="assets/windows_notepad.gif" alt="Dictating into Windows Notepad" width="600">
+</p>
+
 ## Why?
 
 **Your voice, any app.** Tambourine gives you a universal voice interface that works everywhere: emails, messages, documents, code editors, terminals. Press a hotkey, speak, and your words are typed at your cursor. No copy-pasting, no app switching, no limitations.
@@ -64,6 +68,15 @@ Open-source alternative to [Wispr Flow](https://wisprflow.ai) and [Superwhisper]
 - **Sound Feedback** - Audio cues for recording start/stop
 - **Auto-Mute Audio** - Automatically mute system audio while dictating (Windows/macOS)
 - **In-App Provider Selection** - Switch STT and LLM providers without restarting
+
+## Planned Features
+
+- **Context-Aware Formatting** - Automatically detect which application is focused and tailor formatting accordingly. Email clients get proper salutations and sign-offs, messaging apps get casual formatting, code editors get syntax-aware output with proper casing and punctuation.
+- **Voice-Driven Text Modification** - Highlight existing text and describe how to modify it. Select a paragraph and say "make this more formal" or "fix the grammar" to transform text in place.
+- **Voice Shortcuts** - Create custom triggers that expand to full formatted text. Say "insert meeting link" to paste your scheduling URL, or "sign off" for your email signature.
+- **Auto-Learning Dictionary** - Automatically learn new words, names, and terminology from your usage patterns rather than requiring manual dictionary entries.
+- **Observability and Evaluation** - Integrate tooling from Pipecat and other voice agent frameworks to track transcription quality, latency metrics, and formatting accuracy. Use insights to continuously optimize your personal dictation workflow.
+- **Hosted Service** - Optional cloud-hosted backend so you can use Tambourine without running the Python server locally.
 
 ## Architecture
 
