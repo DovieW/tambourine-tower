@@ -14,9 +14,6 @@ const KEY_EVENT_DELAY_MS: u64 = 50;
 /// Delay before restoring previous clipboard content
 const CLIPBOARD_RESTORE_DELAY_MS: u64 = 100;
 
-/// Delay between keystrokes when typing character by character
-const KEYSTROKE_DELAY_MS: u64 = 12;
-
 const SERVER_URL: &str = "http://127.0.0.1:8765";
 
 /// Output mode for transcribed text
@@ -130,31 +127,41 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 /// Type text character by character as keystrokes
 pub fn type_as_keystrokes(text: &str) -> Result<(), String> {
+    // Wait for any modifier keys from the hotkey to be fully released.
+    // This prevents typed characters from combining with Ctrl/Alt/etc.
+    thread::sleep(Duration::from_millis(250));
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
 
-    // Longer initial delay to ensure the target application is ready
-    thread::sleep(Duration::from_millis(150));
+    // Best-effort: explicitly release common modifiers.
+    // On some platforms the global shortcut key-up may arrive slightly late; releasing here
+    // avoids "shortcut chaos" where characters are treated as Ctrl+... shortcuts.
+    let _ = enigo.key(Key::Control, Direction::Release);
+    let _ = enigo.key(Key::Alt, Direction::Release);
+    let _ = enigo.key(Key::Shift, Direction::Release);
+    let _ = enigo.key(Key::Meta, Direction::Release);
 
-    for c in text.chars() {
-        // Handle special characters
-        match c {
-            '\n' => {
-                enigo.key(Key::Return, Direction::Press).map_err(|e| e.to_string())?;
-                thread::sleep(Duration::from_millis(8));
-                enigo.key(Key::Return, Direction::Release).map_err(|e| e.to_string())?;
-            }
-            '\t' => {
-                enigo.key(Key::Tab, Direction::Press).map_err(|e| e.to_string())?;
-                thread::sleep(Duration::from_millis(8));
-                enigo.key(Key::Tab, Direction::Release).map_err(|e| e.to_string())?;
-            }
-            _ => {
-                enigo.key(Key::Unicode(c), Direction::Press).map_err(|e| e.to_string())?;
-                thread::sleep(Duration::from_millis(8));
-                enigo.key(Key::Unicode(c), Direction::Release).map_err(|e| e.to_string())?;
-            }
+    // Throttle typing to avoid dropped characters in some targets (especially when repeatedly
+    // triggering Output Last Transcription).
+    const CHUNK_CHARS: usize = 24;
+    const CHUNK_DELAY_MS: u64 = 18;
+
+    let mut buf = String::with_capacity(CHUNK_CHARS * 2);
+    let mut count = 0usize;
+    for ch in text.chars() {
+        buf.push(ch);
+        count += 1;
+
+        if count >= CHUNK_CHARS {
+            enigo.text(&buf).map_err(|e| e.to_string())?;
+            buf.clear();
+            count = 0;
+            thread::sleep(Duration::from_millis(CHUNK_DELAY_MS));
         }
-        thread::sleep(Duration::from_millis(KEYSTROKE_DELAY_MS));
+    }
+
+    if !buf.is_empty() {
+        enigo.text(&buf).map_err(|e| e.to_string())?;
     }
 
     log::info!("Typed {} chars as keystrokes", text.len());

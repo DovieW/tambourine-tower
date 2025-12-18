@@ -73,7 +73,7 @@ export function AudioSettings() {
 	return (
 		<>
 			<DeviceSelector />
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Sound feedback</p>
 					<p className="settings-description">
@@ -88,7 +88,7 @@ export function AudioSettings() {
 					size="md"
 				/>
 			</div>
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Mute audio during recording</p>
 					<p className="settings-description">
@@ -111,7 +111,7 @@ export function AudioSettings() {
 					/>
 				</Tooltip>
 			</div>
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Overlay widget</p>
 					<p className="settings-description">
@@ -134,7 +134,7 @@ export function AudioSettings() {
 					}}
 				/>
 			</div>
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Widget position</p>
 					<p className="settings-description">
@@ -157,7 +157,7 @@ export function AudioSettings() {
 					}}
 				/>
 			</div>
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Output mode</p>
 					<p className="settings-description">How to output transcribed text</p>

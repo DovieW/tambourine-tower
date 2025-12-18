@@ -188,6 +188,7 @@ export function ProvidersSettings() {
 							value={settings?.stt_provider ?? null}
 							onChange={handleSTTProviderChange}
 							placeholder="Select provider"
+							withCheckIcon={false}
 							disabled={
 								sttCloudProviders.length === 0 && sttLocalProviders.length === 0
 							}
@@ -206,7 +207,7 @@ export function ProvidersSettings() {
 
 			{/* STT Model - only show if provider has models */}
 			{sttModelOptions.length > 0 && (
-				<div className="settings-row" style={{ marginTop: 12 }}>
+				<div className="settings-row">
 					<div>
 						<p className="settings-label">STT Model</p>
 						<p className="settings-description">
@@ -218,6 +219,7 @@ export function ProvidersSettings() {
 						value={settings?.stt_model ?? sttModelOptions[0]?.value ?? null}
 						onChange={handleSTTModelChange}
 						placeholder="Select model"
+						withCheckIcon={false}
 						styles={{
 							input: {
 								backgroundColor: "var(--bg-elevated)",
@@ -231,7 +233,7 @@ export function ProvidersSettings() {
 			)}
 
 			{/* LLM Provider */}
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div>
 					<p className="settings-label">Language Model Provider</p>
 					<p className="settings-description">AI service for text formatting</p>
@@ -245,6 +247,7 @@ export function ProvidersSettings() {
 							value={settings?.llm_provider ?? null}
 							onChange={handleLLMProviderChange}
 							placeholder="Select provider"
+							withCheckIcon={false}
 							disabled={
 								llmCloudProviders.length === 0 && llmLocalProviders.length === 0
 							}
@@ -263,7 +266,7 @@ export function ProvidersSettings() {
 
 			{/* LLM Model - only show if provider has models */}
 			{llmModelOptions.length > 0 && (
-				<div className="settings-row" style={{ marginTop: 12 }}>
+				<div className="settings-row">
 					<div>
 						<p className="settings-label">LLM Model</p>
 						<p className="settings-description">
@@ -275,6 +278,7 @@ export function ProvidersSettings() {
 						value={settings?.llm_model ?? llmModelOptions[0]?.value ?? null}
 						onChange={handleLLMModelChange}
 						placeholder="Select model"
+						withCheckIcon={false}
 						styles={{
 							input: {
 								backgroundColor: "var(--bg-elevated)",
@@ -288,7 +292,7 @@ export function ProvidersSettings() {
 			)}
 
 			{/* STT Timeout */}
-			<div className="settings-row" style={{ marginTop: 16 }}>
+			<div className="settings-row">
 				<div style={{ flex: 1 }}>
 					<p className="settings-label">STT Timeout</p>
 					<p className="settings-description">
