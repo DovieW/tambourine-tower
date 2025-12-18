@@ -252,7 +252,13 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
             }
             ShortcutState::Released => {
                 if state.toggle_key_held.swap(false, Ordering::SeqCst) {
-                    if state.is_recording.load(Ordering::SeqCst) {
+                    // Check pipeline state directly instead of AppState
+                    let is_recording = app
+                        .try_state::<pipeline::SharedPipeline>()
+                        .map(|p| p.state() == pipeline::PipelineState::Recording)
+                        .unwrap_or(false);
+
+                    if is_recording {
                         stop_recording(
                             app,
                             &state,
@@ -279,26 +285,42 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
         match event.state {
             ShortcutState::Pressed => {
                 if !state.ptt_key_held.swap(true, Ordering::SeqCst) {
-                    start_recording(
-                        app,
-                        &state,
-                        sound_enabled,
-                        &audio_mute_manager,
-                        auto_mute_audio,
-                        "Hold",
-                    );
+                    // Only start if pipeline is not already recording/transcribing
+                    let can_start = app
+                        .try_state::<pipeline::SharedPipeline>()
+                        .map(|p| p.state().can_start_recording())
+                        .unwrap_or(false);
+
+                    if can_start {
+                        start_recording(
+                            app,
+                            &state,
+                            sound_enabled,
+                            &audio_mute_manager,
+                            auto_mute_audio,
+                            "Hold",
+                        );
+                    }
                 }
             }
             ShortcutState::Released => {
                 if state.ptt_key_held.swap(false, Ordering::SeqCst) {
-                    stop_recording(
-                        app,
-                        &state,
-                        sound_enabled,
-                        &audio_mute_manager,
-                        auto_mute_audio,
-                        "Hold",
-                    );
+                    // Only stop if pipeline is actually recording
+                    let is_recording = app
+                        .try_state::<pipeline::SharedPipeline>()
+                        .map(|p| p.state() == pipeline::PipelineState::Recording)
+                        .unwrap_or(false);
+
+                    if is_recording {
+                        stop_recording(
+                            app,
+                            &state,
+                            sound_enabled,
+                            &audio_mute_manager,
+                            auto_mute_audio,
+                            "Hold",
+                        );
+                    }
                 }
             }
         }
