@@ -3,10 +3,12 @@ import {
 	useIsAudioMuteSupported,
 	useSettings,
 	useUpdateAutoMuteAudio,
+	useUpdateOutputMode,
 	useUpdateOverlayMode,
 	useUpdateSoundEnabled,
+	useUpdateWidgetPosition,
 } from "../../lib/queries";
-import type { OverlayMode } from "../../lib/tauri";
+import type { OutputMode, OverlayMode, WidgetPosition } from "../../lib/tauri";
 import { DeviceSelector } from "../DeviceSelector";
 
 const OVERLAY_MODE_OPTIONS = [
@@ -15,12 +17,30 @@ const OVERLAY_MODE_OPTIONS = [
 	{ value: "never", label: "Hidden" },
 ];
 
+const WIDGET_POSITION_OPTIONS = [
+	{ value: "top-left", label: "Top Left" },
+	{ value: "top-center", label: "Top Center" },
+	{ value: "top-right", label: "Top Right" },
+	{ value: "center", label: "Center" },
+	{ value: "bottom-left", label: "Bottom Left" },
+	{ value: "bottom-center", label: "Bottom Center" },
+	{ value: "bottom-right", label: "Bottom Right" },
+];
+
+const OUTPUT_MODE_OPTIONS = [
+	{ value: "auto_paste", label: "Auto-paste (Ctrl+V / Cmd+V)" },
+	{ value: "clipboard", label: "Copy to clipboard only" },
+	{ value: "keystrokes", label: "Type as keystrokes" },
+];
+
 export function AudioSettings() {
 	const { data: settings, isLoading } = useSettings();
 	const { data: isAudioMuteSupported } = useIsAudioMuteSupported();
 	const updateSoundEnabled = useUpdateSoundEnabled();
 	const updateAutoMuteAudio = useUpdateAutoMuteAudio();
 	const updateOverlayMode = useUpdateOverlayMode();
+	const updateWidgetPosition = useUpdateWidgetPosition();
+	const updateOutputMode = useUpdateOutputMode();
 
 	const handleSoundToggle = (checked: boolean) => {
 		updateSoundEnabled.mutate(checked);
@@ -33,6 +53,18 @@ export function AudioSettings() {
 	const handleOverlayModeChange = (value: string | null) => {
 		if (value) {
 			updateOverlayMode.mutate(value as OverlayMode);
+		}
+	};
+
+	const handleWidgetPositionChange = (value: string | null) => {
+		if (value) {
+			updateWidgetPosition.mutate(value as WidgetPosition);
+		}
+	};
+
+	const handleOutputModeChange = (value: string | null) => {
+		if (value) {
+			updateOutputMode.mutate(value as OutputMode);
 		}
 	};
 
@@ -95,6 +127,48 @@ export function AudioSettings() {
 							borderColor: "var(--border-default)",
 							color: "var(--text-primary)",
 							minWidth: 180,
+						},
+					}}
+				/>
+			</div>
+			<div className="settings-row" style={{ marginTop: 16 }}>
+				<div>
+					<p className="settings-label">Widget position</p>
+					<p className="settings-description">
+						Default position of the overlay widget on screen
+					</p>
+				</div>
+				<Select
+					data={WIDGET_POSITION_OPTIONS}
+					value={settings?.widget_position ?? "bottom-right"}
+					onChange={handleWidgetPositionChange}
+					disabled={isLoading || settings?.overlay_mode === "never"}
+					styles={{
+						input: {
+							backgroundColor: "var(--bg-elevated)",
+							borderColor: "var(--border-default)",
+							color: "var(--text-primary)",
+							minWidth: 180,
+						},
+					}}
+				/>
+			</div>
+			<div className="settings-row" style={{ marginTop: 16 }}>
+				<div>
+					<p className="settings-label">Output mode</p>
+					<p className="settings-description">How to output transcribed text</p>
+				</div>
+				<Select
+					data={OUTPUT_MODE_OPTIONS}
+					value={settings?.output_mode ?? "auto_paste"}
+					onChange={handleOutputModeChange}
+					disabled={isLoading}
+					styles={{
+						input: {
+							backgroundColor: "var(--bg-elevated)",
+							borderColor: "var(--border-default)",
+							color: "var(--text-primary)",
+							minWidth: 220,
 						},
 					}}
 				/>

@@ -466,7 +466,7 @@ export function LogsView() {
 			)}
 
 			{isLoading ? (
-				<Paper withBorder p="xl" ta="center">
+				<Paper withBorder p="md" ta="center" mih={100}>
 					<Loader size="sm" />
 					<Text size="sm" c="dimmed" mt="xs">
 						Loading logs...

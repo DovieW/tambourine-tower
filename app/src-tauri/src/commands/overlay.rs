@@ -76,3 +76,56 @@ pub async fn set_overlay_mode(app: AppHandle, mode: String) -> Result<(), String
     }
     Ok(())
 }
+
+/// Set overlay widget position on screen
+#[tauri::command]
+pub async fn set_widget_position(app: AppHandle, position: String) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("overlay") else {
+        return Err("Overlay window not found".to_string());
+    };
+
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("No monitor found")?;
+
+    let screen_size = monitor.size();
+    let scale = monitor.scale_factor();
+    let screen_width = screen_size.width as f64 / scale;
+    let screen_height = screen_size.height as f64 / scale;
+
+    // Get current window size
+    let window_size = window.outer_size().map_err(|e| e.to_string())?;
+    let window_width = window_size.width as f64 / scale;
+    let window_height = window_size.height as f64 / scale;
+
+    // Calculate margins (pixels from edge)
+    let margin = 50.0;
+
+    let (x, y) = match position.as_str() {
+        "top-left" => (margin, margin),
+        "top-center" => ((screen_width - window_width) / 2.0, margin),
+        "top-right" => (screen_width - window_width - margin, margin),
+        "center" => (
+            (screen_width - window_width) / 2.0,
+            (screen_height - window_height) / 2.0,
+        ),
+        "bottom-left" => (margin, screen_height - window_height - margin),
+        "bottom-center" => (
+            (screen_width - window_width) / 2.0,
+            screen_height - window_height - margin,
+        ),
+        "bottom-right" => (
+            screen_width - window_width - margin,
+            screen_height - window_height - margin,
+        ),
+        _ => return Err(format!("Invalid widget position: {}", position)),
+    };
+
+    window
+        .set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+        .map_err(|e| e.to_string())?;
+
+    log::info!("Widget position set to {} at ({}, {})", position, x, y);
+    Ok(())
+}

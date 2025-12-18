@@ -1,6 +1,6 @@
-import { Alert, Button, Text } from "@mantine/core";
+import { Alert, Button } from "@mantine/core";
 import { AlertCircle, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
 	DEFAULT_HOLD_HOTKEY,
 	DEFAULT_PASTE_LAST_HOTKEY,
@@ -28,12 +28,44 @@ export function HotkeySettings() {
 	// Track which input is currently recording (only one at a time)
 	const [recordingInput, setRecordingInput] = useState<RecordingInput>(null);
 
+	// Track dismissed error to allow auto-dismiss
+	const [dismissedError, setDismissedError] = useState<string | null>(null);
+
 	// Collect any errors from mutations
-	const error =
+	const rawError =
 		updateToggleHotkey.error ||
 		updateHoldHotkey.error ||
 		updatePasteLastHotkey.error ||
 		resetHotkeys.error;
+
+	const errorMessage =
+		rawError instanceof Error
+			? rawError.message
+			: rawError
+				? String(rawError)
+				: null;
+
+	// Only show error if not dismissed
+	const showError = errorMessage && errorMessage !== dismissedError;
+
+	// Auto-dismiss error after 5 seconds
+	useEffect(() => {
+		if (!errorMessage || errorMessage === dismissedError) return;
+
+		const timer = setTimeout(() => {
+			setDismissedError(errorMessage);
+		}, 5000);
+
+		return () => clearTimeout(timer);
+	}, [errorMessage, dismissedError]);
+
+	// Reset dismissed error when a new error appears
+	useEffect(() => {
+		if (errorMessage && errorMessage !== dismissedError) {
+			// New error appeared, clear previous dismissed state
+			setDismissedError(null);
+		}
+	}, [errorMessage, dismissedError]);
 
 	const handleToggleHotkeyChange = (config: HotkeyConfig) => {
 		updateToggleHotkey.mutate(config);
@@ -49,14 +81,16 @@ export function HotkeySettings() {
 
 	return (
 		<>
-			{error && (
+			{showError && (
 				<Alert
 					icon={<AlertCircle size={16} />}
 					color="red"
 					mb="md"
 					title="Error"
+					withCloseButton
+					onClose={() => setDismissedError(errorMessage)}
 				>
-					{error instanceof Error ? error.message : String(error)}
+					{errorMessage}
 				</Alert>
 			)}
 			<HotkeyInput
@@ -103,12 +137,9 @@ export function HotkeySettings() {
 					borderTop: "1px solid var(--mantine-color-dark-4)",
 					display: "flex",
 					alignItems: "center",
-					justifyContent: "space-between",
+					justifyContent: "flex-end",
 				}}
 			>
-				<Text size="sm" c="dimmed">
-					Reset all hotkeys to their default values
-				</Text>
 				<Button
 					variant="light"
 					color="gray"

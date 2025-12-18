@@ -1,12 +1,4 @@
-import {
-	Accordion,
-	Kbd,
-	Loader,
-	NavLink,
-	Text,
-	Title,
-	Tooltip,
-} from "@mantine/core";
+import { Kbd, NavLink, Tabs, Text, Title, Tooltip } from "@mantine/core";
 import { FileText, Home, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import { HistoryFeed } from "./components/HistoryFeed";
@@ -50,26 +42,17 @@ function ConnectionStatusIndicator() {
 		};
 	}, []);
 
-	const isConnected =
+	const isReady =
 		state === "idle" || state === "recording" || state === "processing";
-	const isConnecting = state === "connecting";
 
-	const statusText = isConnecting
-		? "Connecting..."
-		: isConnected
-			? "Connected"
-			: "Disconnected";
+	const statusText = isReady ? "Ready" : "Initializing...";
 
 	return (
 		<Tooltip label={statusText} position="right" withArrow>
 			<div className="connection-status">
-				{isConnecting ? (
-					<Loader size={10} color="gray" />
-				) : (
-					<span
-						className={`connection-status-dot ${isConnected ? "connected" : "disconnected"}`}
-					/>
-				)}
+				<span
+					className={`connection-status-dot ${isReady ? "connected" : "disconnected"}`}
+				/>
 			</div>
 		</Tooltip>
 	);
@@ -201,13 +184,7 @@ function HomeView() {
 	);
 }
 
-function SettingsView({
-	expandedSection,
-	onSectionChange,
-}: {
-	expandedSection: string | null;
-	onSectionChange: (section: string | null) => void;
-}) {
+function SettingsView() {
 	return (
 		<div className="main-content">
 			<header className="animate-in" style={{ marginBottom: 32 }}>
@@ -219,70 +196,58 @@ function SettingsView({
 				</Text>
 			</header>
 
-			<Accordion
-				value={expandedSection}
-				onChange={onSectionChange}
-				classNames={{
-					root: "settings-accordion",
-					item: "settings-section animate-in",
-					control: "settings-section-title",
-					panel: "settings-card",
-				}}
-			>
-				<Accordion.Item value="api-keys">
-					<Accordion.Control>API Keys</Accordion.Control>
-					<Accordion.Panel>
+			<Tabs defaultValue="api-keys" classNames={{ root: "settings-tabs" }}>
+				<Tabs.List>
+					<Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
+					<Tabs.Tab value="providers">Providers</Tabs.Tab>
+					<Tabs.Tab value="audio">Audio &amp; Overlay</Tabs.Tab>
+					<Tabs.Tab value="hotkeys">Hotkeys</Tabs.Tab>
+					<Tabs.Tab value="prompts">Prompts</Tabs.Tab>
+				</Tabs.List>
+
+				<Tabs.Panel value="api-keys" pt="md">
+					<div className="settings-card">
 						<ApiKeysSettings />
-					</Accordion.Panel>
-				</Accordion.Item>
+					</div>
+				</Tabs.Panel>
 
-				<Accordion.Item value="providers">
-					<Accordion.Control>Providers</Accordion.Control>
-					<Accordion.Panel>
+				<Tabs.Panel value="providers" pt="md">
+					<div className="settings-card">
 						<ProvidersSettings />
-					</Accordion.Panel>
-				</Accordion.Item>
+					</div>
+				</Tabs.Panel>
 
-				<Accordion.Item value="audio">
-					<Accordion.Control>Audio &amp; Overlay</Accordion.Control>
-					<Accordion.Panel>
+				<Tabs.Panel value="audio" pt="md">
+					<div className="settings-card">
 						<AudioSettings />
-					</Accordion.Panel>
-				</Accordion.Item>
+					</div>
+				</Tabs.Panel>
 
-				<Accordion.Item value="hotkeys">
-					<Accordion.Control>Hotkeys</Accordion.Control>
-					<Accordion.Panel>
+				<Tabs.Panel value="hotkeys" pt="md">
+					<div className="settings-card">
 						<HotkeySettings />
-					</Accordion.Panel>
-				</Accordion.Item>
+					</div>
+				</Tabs.Panel>
 
-				<Accordion.Item value="prompts">
-					<Accordion.Control>Prompts</Accordion.Control>
-					<Accordion.Panel>
+				<Tabs.Panel value="prompts" pt="md">
+					<div className="settings-card">
 						<PromptSettings />
-					</Accordion.Panel>
-				</Accordion.Item>
-			</Accordion>
+					</div>
+				</Tabs.Panel>
+			</Tabs>
 		</div>
 	);
 }
 
 export default function App() {
 	const [activeView, setActiveView] = useState<View>("home");
-	const [expandedSection, setExpandedSection] = useState<string | null>(null);
 
 	const renderView = () => {
 		switch (activeView) {
 			case "home":
 				return <HomeView />;
 			case "settings":
-				return (
-					<SettingsView
-						expandedSection={expandedSection}
-						onSectionChange={setExpandedSection}
-					/>
-				);
+				return <SettingsView />;
 			case "logs":
 				return <LogsView />;
 			default:

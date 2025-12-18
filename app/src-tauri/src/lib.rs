@@ -89,6 +89,73 @@ fn emit_system_event(app: &AppHandle, event_type: &str, message: &str, details: 
     let _ = app.emit("system-event", event);
 }
 
+/// Filter out common Whisper hallucinations from transcription
+/// These are phrases that Whisper generates for silent or unclear audio
+fn filter_whisper_hallucinations(transcript: &str) -> Option<String> {
+    let trimmed = transcript.trim();
+
+    // Common Whisper hallucinations (case-insensitive)
+    let hallucinations = [
+        "thank you",
+        "thanks for watching",
+        "thanks for listening",
+        "see you next time",
+        "bye",
+        "goodbye",
+        "see you",
+        "the end",
+        "...",
+        "you",
+        "i'm sorry",
+        "sorry",
+        "okay",
+        "ok",
+        "yes",
+        "no",
+        "um",
+        "uh",
+        "hmm",
+        "mm",
+        "ah",
+        "oh",
+        "huh",
+        "silence",
+        "[silence]",
+        "(silence)",
+        "[music]",
+        "(music)",
+        "[applause]",
+        "(applause)",
+        "[laughter]",
+        "(laughter)",
+        "please subscribe",
+        "like and subscribe",
+    ];
+
+    let lower = trimmed.to_lowercase();
+
+    // Check if the entire transcript matches a hallucination phrase
+    for phrase in hallucinations {
+        // Match exact phrase or phrase with trailing punctuation
+        if lower == phrase
+            || lower == format!("{}.", phrase)
+            || lower == format!("{}!", phrase)
+            || lower == format!("{}?", phrase)
+            || lower == format!("{}...", phrase)
+        {
+            log::info!("Filtered Whisper hallucination: '{}'", trimmed);
+            return None;
+        }
+    }
+
+    // Return the original (with whitespace trimmed) if not a hallucination
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Start recording with sound and audio mute handling
 #[cfg(desktop)]
 fn start_recording(
@@ -174,6 +241,10 @@ fn stop_recording(
     // Get overlay mode for hiding after transcription
     let overlay_mode: String = get_setting_from_store(app, "overlay_mode", "always".to_string());
 
+    // Get output mode for how to output text
+    let output_mode_str: String = get_setting_from_store(app, "output_mode", "auto_paste".to_string());
+    let output_mode = commands::text::OutputMode::from_str(&output_mode_str);
+
     // Stop pipeline and trigger transcription in background
     if let Some(pipeline) = app.try_state::<pipeline::SharedPipeline>() {
         let pipeline_clone = (*pipeline).clone();
@@ -184,20 +255,28 @@ fn stop_recording(
             match pipeline_clone.stop_and_transcribe().await {
                 Ok(transcript) => {
                     log::info!("Transcription complete: {} chars", transcript.len());
-                    let _ = app_clone.emit("pipeline-transcript-ready", &transcript);
 
-                    // Type the transcript
-                    if !transcript.is_empty() {
-                        if let Err(e) = commands::text::type_text_blocking(&transcript) {
-                            log::error!("Failed to type transcript: {}", e);
+                    // Filter out Whisper hallucinations
+                    let filtered_transcript = filter_whisper_hallucinations(&transcript);
+
+                    if let Some(ref text) = filtered_transcript {
+                        let _ = app_clone.emit("pipeline-transcript-ready", text);
+
+                        // Output the transcript based on mode
+                        if let Err(e) = commands::text::output_text_with_mode(text, output_mode) {
+                            log::error!("Failed to output transcript: {}", e);
                         }
 
                         // Save to history
                         if let Some(history) = app_clone.try_state::<HistoryStorage>() {
-                            if let Err(e) = history.add_entry(transcript) {
+                            if let Err(e) = history.add_entry(text.clone()) {
                                 log::warn!("Failed to save to history: {}", e);
                             }
                         }
+                    } else {
+                        // Emit empty transcript event so UI can update appropriately
+                        let _ = app_clone.emit("pipeline-transcript-ready", "");
+                        log::info!("Transcript filtered as hallucination, not outputting");
                     }
 
                     // Hide overlay after transcription completes if in "recording_only" mode
@@ -434,6 +513,7 @@ pub fn run() {
             commands::overlay::show_overlay,
             commands::overlay::hide_overlay,
             commands::overlay::set_overlay_mode,
+            commands::overlay::set_widget_position,
             // Pipeline commands for all-in-app STT
             commands::recording::pipeline_start_recording,
             commands::recording::pipeline_stop_and_transcribe,
@@ -552,16 +632,40 @@ pub fn run() {
                 }
             }
 
-            // Position bottom-right
+            // Position overlay based on saved setting
             if let Ok(Some(monitor)) = overlay.current_monitor() {
                 let size = monitor.size();
                 let scale = monitor.scale_factor();
-                let x = (size.width as f64 / scale) as i32 - 150;
-                let y = (size.height as f64 / scale) as i32 - 100;
-                let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                    x: x as f64,
-                    y: y as f64,
-                }));
+                let screen_width = size.width as f64 / scale;
+                let screen_height = size.height as f64 / scale;
+
+                // Assume initial window size of 48x48 (before content loads)
+                let window_width = 48.0;
+                let window_height = 48.0;
+                let margin = 50.0;
+
+                let widget_position: String = get_setting_from_store(app.handle(), "widget_position", "bottom-right".to_string());
+
+                let (x, y) = match widget_position.as_str() {
+                    "top-left" => (margin, margin),
+                    "top-center" => ((screen_width - window_width) / 2.0, margin),
+                    "top-right" => (screen_width - window_width - margin, margin),
+                    "center" => (
+                        (screen_width - window_width) / 2.0,
+                        (screen_height - window_height) / 2.0,
+                    ),
+                    "bottom-left" => (margin, screen_height - window_height - margin),
+                    "bottom-center" => (
+                        (screen_width - window_width) / 2.0,
+                        screen_height - window_height - margin,
+                    ),
+                    _ => ( // "bottom-right" or unknown
+                        screen_width - window_width - margin,
+                        screen_height - window_height - margin,
+                    ),
+                };
+
+                let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
             }
 
             // Set initial overlay visibility based on saved settings

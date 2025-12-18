@@ -329,40 +329,32 @@ body {
 	color: var(--text-muted);
 }
 
-/* Settings Panel */
-.settings-accordion {
-	display: flex;
-	flex-direction: column;
-	gap: 16px;
+/* Settings Tabs */
+.settings-tabs .mantine-Tabs-list {
+	border-bottom: 1px solid var(--border-subtle);
+	gap: 0;
+	margin-bottom: 16px;
 }
 
-.settings-accordion .settings-section {
-	margin-bottom: 0;
-	background: var(--bg-card);
-	border: 1px solid var(--border-subtle);
-	border-radius: 12px;
-}
-
-.settings-accordion .settings-section-title {
+.settings-tabs .mantine-Tabs-tab {
 	font-family: "Sora", sans-serif;
-	font-size: 14px;
-	font-weight: 600;
-	color: var(--text-primary);
-	padding: 16px 20px;
-	margin-bottom: 0;
-	cursor: pointer;
-	border-radius: 12px;
-}
-
-.settings-accordion .settings-section-title:hover {
-	background: var(--bg-hover);
-}
-
-.settings-accordion .settings-card {
-	background: transparent;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text-secondary);
+	padding: 12px 20px;
 	border: none;
-	border-radius: 0;
-	padding: 0 20px 20px;
+	background: transparent;
+	transition: all 0.2s ease;
+}
+
+.settings-tabs .mantine-Tabs-tab:hover {
+	color: var(--text-primary);
+	background: var(--bg-elevated);
+}
+
+.settings-tabs .mantine-Tabs-tab[data-active] {
+	color: var(--text-primary);
+	border-bottom: 2px solid var(--accent-primary);
 }
 
 .settings-section {

@@ -5,8 +5,10 @@ import {
 	configAPI,
 	type HotkeyConfig,
 	logsAPI,
+	type OutputMode,
 	tauriAPI,
 	validateHotkeyNotDuplicate,
+	type WidgetPosition,
 } from "./tauri";
 
 export function useTypeText() {
@@ -146,6 +148,27 @@ export function useUpdateOverlayMode() {
 	return useMutation({
 		mutationFn: (mode: "always" | "never" | "recording_only") =>
 			tauriAPI.updateOverlayMode(mode),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["settings"] });
+		},
+	});
+}
+
+export function useUpdateWidgetPosition() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (position: WidgetPosition) =>
+			tauriAPI.updateWidgetPosition(position),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["settings"] });
+		},
+	});
+}
+
+export function useUpdateOutputMode() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (mode: OutputMode) => tauriAPI.updateOutputMode(mode),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["settings"] });
 		},

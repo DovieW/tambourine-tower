@@ -49,6 +49,17 @@ export interface CleanupPromptSections {
 
 export type OverlayMode = "always" | "never" | "recording_only";
 
+export type WidgetPosition =
+	| "center"
+	| "top-left"
+	| "top-center"
+	| "top-right"
+	| "bottom-left"
+	| "bottom-center"
+	| "bottom-right";
+
+export type OutputMode = "auto_paste" | "clipboard" | "keystrokes";
+
 export interface AppSettings {
 	toggle_hotkey: HotkeyConfig;
 	hold_hotkey: HotkeyConfig;
@@ -63,6 +74,8 @@ export interface AppSettings {
 	auto_mute_audio: boolean;
 	stt_timeout_seconds: number | null;
 	overlay_mode: OverlayMode;
+	widget_position: WidgetPosition;
+	output_mode: OutputMode;
 }
 
 // ============================================================================
@@ -211,6 +224,9 @@ export const tauriAPI = {
 			stt_timeout_seconds:
 				(await store.get<number | null>("stt_timeout_seconds")) ?? null,
 			overlay_mode: (await store.get<OverlayMode>("overlay_mode")) ?? "always",
+			widget_position:
+				(await store.get<WidgetPosition>("widget_position")) ?? "bottom-right",
+			output_mode: (await store.get<OutputMode>("output_mode")) ?? "auto_paste",
 		};
 	},
 
@@ -294,6 +310,20 @@ export const tauriAPI = {
 		await store.save();
 		// Apply the mode immediately
 		await invoke("set_overlay_mode", { mode });
+	},
+
+	async updateWidgetPosition(position: WidgetPosition): Promise<void> {
+		const store = await getStore();
+		await store.set("widget_position", position);
+		await store.save();
+		// Apply the position immediately
+		await invoke("set_widget_position", { position });
+	},
+
+	async updateOutputMode(mode: OutputMode): Promise<void> {
+		const store = await getStore();
+		await store.set("output_mode", mode);
+		await store.save();
 	},
 
 	async isAudioMuteSupported(): Promise<boolean> {
