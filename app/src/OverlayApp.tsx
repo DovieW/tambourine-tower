@@ -367,13 +367,20 @@ function RecordingControl() {
 	]);
 
 	// Hotkey event listeners
+	// Listen for recording state changes from shortcuts (Rust handles the actual recording)
 	useEffect(() => {
 		let unlistenStart: (() => void) | undefined;
 		let unlistenStop: (() => void) | undefined;
 
 		const setup = async () => {
-			unlistenStart = await tauriAPI.onStartRecording(onStartRecording);
-			unlistenStop = await tauriAPI.onStopRecording(onStopRecording);
+			// When shortcut triggers recording, just update UI state (don't call command again)
+			unlistenStart = await tauriAPI.onStartRecording(() => {
+				setPipelineState("recording");
+			});
+			unlistenStop = await tauriAPI.onStopRecording(() => {
+				setPipelineState("transcribing");
+				startResponseTimeout();
+			});
 		};
 
 		setup();
@@ -382,7 +389,7 @@ function RecordingControl() {
 			unlistenStart?.();
 			unlistenStop?.();
 		};
-	}, [onStartRecording, onStopRecording]);
+	}, [startResponseTimeout]);
 
 	// Listen for pipeline events from Rust
 	useEffect(() => {
