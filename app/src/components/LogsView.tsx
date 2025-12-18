@@ -338,7 +338,7 @@ function RequestLogItem({ log }: { log: RequestLog }) {
 }
 
 export function LogsView() {
-	const { data: logs, isLoading, refetch, isRefetching } = useRequestLogs(100);
+	const { data: logs, refetch, isRefetching } = useRequestLogs(100);
 	const clearLogsMutation = useClearRequestLogs();
 	const [systemEvents, setSystemEvents] = useState<SystemEvent[]>([]);
 
@@ -465,14 +465,7 @@ export function LogsView() {
 				</Paper>
 			)}
 
-			{isLoading ? (
-				<Paper withBorder p="md" ta="center" mih={100}>
-					<Loader size="sm" />
-					<Text size="sm" c="dimmed" mt="xs">
-						Loading logs...
-					</Text>
-				</Paper>
-			) : logs && logs.length > 0 ? (
+			{logs && logs.length > 0 ? (
 				<Accordion variant="contained" radius="md" chevronPosition="left">
 					{logs.map((log) => (
 						<RequestLogItem key={log.id} log={log} />

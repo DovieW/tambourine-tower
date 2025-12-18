@@ -196,7 +196,11 @@ function SettingsView() {
 				</Text>
 			</header>
 
-			<Tabs defaultValue="api-keys" classNames={{ root: "settings-tabs" }}>
+			<Tabs
+				defaultValue="api-keys"
+				classNames={{ root: "settings-tabs" }}
+				keepMounted={false}
+			>
 				<Tabs.List>
 					<Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
 					<Tabs.Tab value="providers">Providers</Tabs.Tab>

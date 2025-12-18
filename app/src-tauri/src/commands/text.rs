@@ -15,7 +15,7 @@ const KEY_EVENT_DELAY_MS: u64 = 50;
 const CLIPBOARD_RESTORE_DELAY_MS: u64 = 100;
 
 /// Delay between keystrokes when typing character by character
-const KEYSTROKE_DELAY_MS: u64 = 10;
+const KEYSTROKE_DELAY_MS: u64 = 5;
 
 const SERVER_URL: &str = "http://127.0.0.1:8765";
 
@@ -24,19 +24,28 @@ const SERVER_URL: &str = "http://127.0.0.1:8765";
 pub enum OutputMode {
     /// Copy to clipboard and simulate Ctrl+V/Cmd+V, then restore clipboard
     #[default]
-    AutoPaste,
+    Paste,
+    /// Paste and keep in clipboard (no restore)
+    PasteAndClipboard,
     /// Just copy to clipboard (no paste)
     Clipboard,
     /// Type each character as keystrokes
     Keystrokes,
+    /// Type as keystrokes and also copy to clipboard
+    KeystrokesAndClipboard,
 }
 
 impl OutputMode {
     pub fn from_str(s: &str) -> Self {
         match s {
+            "paste" => OutputMode::Paste,
+            "paste_and_clipboard" => OutputMode::PasteAndClipboard,
             "clipboard" => OutputMode::Clipboard,
             "keystrokes" => OutputMode::Keystrokes,
-            _ => OutputMode::AutoPaste,
+            "keystrokes_and_clipboard" => OutputMode::KeystrokesAndClipboard,
+            // Handle legacy value
+            "auto_paste" => OutputMode::Paste,
+            _ => OutputMode::Paste,
         }
     }
 }
@@ -65,10 +74,50 @@ pub async fn type_text(app: AppHandle, text: String) -> Result<(), String> {
 /// Output text based on the specified mode
 pub fn output_text_with_mode(text: &str, mode: OutputMode) -> Result<(), String> {
     match mode {
-        OutputMode::AutoPaste => type_text_blocking(text),
+        OutputMode::Paste => type_text_blocking(text),
+        OutputMode::PasteAndClipboard => paste_and_keep_clipboard(text),
         OutputMode::Clipboard => copy_to_clipboard(text),
         OutputMode::Keystrokes => type_as_keystrokes(text),
+        OutputMode::KeystrokesAndClipboard => {
+            copy_to_clipboard(text)?;
+            type_as_keystrokes(text)
+        }
     }
+}
+
+/// Copy text to clipboard and paste, keeping text in clipboard (no restore)
+pub fn paste_and_keep_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+
+    // Set new text
+    clipboard.set_text(text).map_err(|e| e.to_string())?;
+
+    // Small delay for clipboard to stabilize
+    thread::sleep(Duration::from_millis(CLIPBOARD_STABILIZATION_DELAY_MS));
+
+    // Simulate Ctrl+V / Cmd+V
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    let modifier = Key::Meta;
+    #[cfg(not(target_os = "macos"))]
+    let modifier = Key::Control;
+
+    enigo
+        .key(modifier, Direction::Press)
+        .map_err(|e| e.to_string())?;
+    thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+    enigo
+        .key(Key::Unicode('v'), Direction::Click)
+        .map_err(|e| e.to_string())?;
+    thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+    enigo
+        .key(modifier, Direction::Release)
+        .map_err(|e| e.to_string())?;
+
+    // Don't restore clipboard - keep the text there
+    log::info!("Pasted {} chars (kept in clipboard)", text.len());
+    Ok(())
 }
 
 /// Copy text to clipboard only (no paste)
@@ -83,17 +132,26 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
 pub fn type_as_keystrokes(text: &str) -> Result<(), String> {
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
 
+    // Small initial delay to ensure the target application is ready
+    thread::sleep(Duration::from_millis(50));
+
     for c in text.chars() {
         // Handle special characters
         match c {
             '\n' => {
-                enigo.key(Key::Return, Direction::Click).map_err(|e| e.to_string())?;
+                enigo.key(Key::Return, Direction::Press).map_err(|e| e.to_string())?;
+                thread::sleep(Duration::from_millis(2));
+                enigo.key(Key::Return, Direction::Release).map_err(|e| e.to_string())?;
             }
             '\t' => {
-                enigo.key(Key::Tab, Direction::Click).map_err(|e| e.to_string())?;
+                enigo.key(Key::Tab, Direction::Press).map_err(|e| e.to_string())?;
+                thread::sleep(Duration::from_millis(2));
+                enigo.key(Key::Tab, Direction::Release).map_err(|e| e.to_string())?;
             }
             _ => {
-                enigo.key(Key::Unicode(c), Direction::Click).map_err(|e| e.to_string())?;
+                enigo.key(Key::Unicode(c), Direction::Press).map_err(|e| e.to_string())?;
+                thread::sleep(Duration::from_millis(2));
+                enigo.key(Key::Unicode(c), Direction::Release).map_err(|e| e.to_string())?;
             }
         }
         thread::sleep(Duration::from_millis(KEYSTROKE_DELAY_MS));

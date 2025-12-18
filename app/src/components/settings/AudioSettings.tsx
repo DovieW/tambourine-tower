@@ -28,9 +28,11 @@ const WIDGET_POSITION_OPTIONS = [
 ];
 
 const OUTPUT_MODE_OPTIONS = [
-	{ value: "auto_paste", label: "Auto-paste (Ctrl+V / Cmd+V)" },
-	{ value: "clipboard", label: "Copy to clipboard only" },
-	{ value: "keystrokes", label: "Type as keystrokes" },
+	{ value: "paste", label: "Paste" },
+	{ value: "paste_and_clipboard", label: "Paste and clipboard" },
+	{ value: "clipboard", label: "Clipboard" },
+	{ value: "keystrokes", label: "Keystrokes" },
+	{ value: "keystrokes_and_clipboard", label: "Keystrokes and clipboard" },
 ];
 
 export function AudioSettings() {
@@ -121,6 +123,7 @@ export function AudioSettings() {
 					value={settings?.overlay_mode ?? "always"}
 					onChange={handleOverlayModeChange}
 					disabled={isLoading}
+					withCheckIcon={false}
 					styles={{
 						input: {
 							backgroundColor: "var(--bg-elevated)",
@@ -143,6 +146,7 @@ export function AudioSettings() {
 					value={settings?.widget_position ?? "bottom-right"}
 					onChange={handleWidgetPositionChange}
 					disabled={isLoading || settings?.overlay_mode === "never"}
+					withCheckIcon={false}
 					styles={{
 						input: {
 							backgroundColor: "var(--bg-elevated)",
@@ -160,9 +164,10 @@ export function AudioSettings() {
 				</div>
 				<Select
 					data={OUTPUT_MODE_OPTIONS}
-					value={settings?.output_mode ?? "auto_paste"}
+					value={settings?.output_mode ?? "paste"}
 					onChange={handleOutputModeChange}
 					disabled={isLoading}
+					withCheckIcon={false}
 					styles={{
 						input: {
 							backgroundColor: "var(--bg-elevated)",

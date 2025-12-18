@@ -242,7 +242,7 @@ fn stop_recording(
     let overlay_mode: String = get_setting_from_store(app, "overlay_mode", "always".to_string());
 
     // Get output mode for how to output text
-    let output_mode_str: String = get_setting_from_store(app, "output_mode", "auto_paste".to_string());
+    let output_mode_str: String = get_setting_from_store(app, "output_mode", "paste".to_string());
     let output_mode = commands::text::OutputMode::from_str(&output_mode_str);
 
     // Stop pipeline and trigger transcription in background
