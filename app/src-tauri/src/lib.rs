@@ -80,6 +80,15 @@ fn start_recording(
 ) {
     state.is_recording.store(true, Ordering::SeqCst);
     log::info!("{}: starting recording", source);
+    
+    // Show overlay if in "recording_only" mode
+    let overlay_mode: String = get_setting_from_store(app, "overlay_mode", "always".to_string());
+    if overlay_mode == "recording_only" {
+        if let Some(window) = app.get_webview_window("overlay") {
+            let _ = window.show();
+        }
+    }
+    
     // Play sound BEFORE muting so it's audible
     if sound_enabled {
         audio::play_sound(audio::SoundType::RecordingStart);
@@ -129,10 +138,14 @@ fn stop_recording(
         audio::play_sound(audio::SoundType::RecordingStop);
     }
 
+    // Get overlay mode for hiding after transcription
+    let overlay_mode: String = get_setting_from_store(app, "overlay_mode", "always".to_string());
+
     // Stop pipeline and trigger transcription in background
     if let Some(pipeline) = app.try_state::<pipeline::SharedPipeline>() {
         let pipeline_clone = (*pipeline).clone();
         let app_clone = app.clone();
+        let overlay_mode_clone = overlay_mode.clone();
         tauri::async_runtime::spawn(async move {
             let _ = app_clone.emit("pipeline-transcription-started", ());
             match pipeline_clone.stop_and_transcribe().await {
@@ -153,10 +166,24 @@ fn stop_recording(
                             }
                         }
                     }
+                    
+                    // Hide overlay after transcription completes if in "recording_only" mode
+                    if overlay_mode_clone == "recording_only" {
+                        if let Some(window) = app_clone.get_webview_window("overlay") {
+                            let _ = window.hide();
+                        }
+                    }
                 }
                 Err(e) => {
                     log::error!("Transcription failed: {}", e);
                     let _ = app_clone.emit("pipeline-error", e.to_string());
+                    
+                    // Hide overlay even on error if in "recording_only" mode
+                    if overlay_mode_clone == "recording_only" {
+                        if let Some(window) = app_clone.get_webview_window("overlay") {
+                            let _ = window.hide();
+                        }
+                    }
                 }
             }
         });
@@ -339,6 +366,9 @@ pub fn run() {
             commands::history::delete_history_entry,
             commands::history::clear_history,
             commands::overlay::resize_overlay,
+            commands::overlay::show_overlay,
+            commands::overlay::hide_overlay,
+            commands::overlay::set_overlay_mode,
             // Pipeline commands for all-in-app STT
             commands::recording::pipeline_start_recording,
             commands::recording::pipeline_stop_and_transcribe,
@@ -467,6 +497,18 @@ pub fn run() {
                     x: x as f64,
                     y: y as f64,
                 }));
+            }
+
+            // Set initial overlay visibility based on saved settings
+            #[cfg(desktop)]
+            {
+                let overlay_mode: String = get_setting_from_store(app.handle(), "overlay_mode", "always".to_string());
+                match overlay_mode.as_str() {
+                    "never" | "recording_only" => {
+                        let _ = overlay.hide();
+                    }
+                    _ => {} // "always" - keep visible (default)
+                }
             }
 
             // Setup system tray

@@ -37,3 +37,42 @@ pub async fn resize_overlay(app: AppHandle, width: f64, height: f64) -> Result<(
     }
     Ok(())
 }
+
+#[tauri::command]
+pub async fn show_overlay(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("overlay") {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn hide_overlay(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("overlay") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Set overlay mode: "always", "never", or "recording_only"
+#[tauri::command]
+pub async fn set_overlay_mode(app: AppHandle, mode: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("overlay") {
+        match mode.as_str() {
+            "always" => {
+                window.show().map_err(|e| e.to_string())?;
+            }
+            "never" => {
+                window.hide().map_err(|e| e.to_string())?;
+            }
+            "recording_only" => {
+                // Hide initially, will be shown when recording starts
+                window.hide().map_err(|e| e.to_string())?;
+            }
+            _ => {
+                return Err(format!("Invalid overlay mode: {}", mode));
+            }
+        }
+    }
+    Ok(())
+}

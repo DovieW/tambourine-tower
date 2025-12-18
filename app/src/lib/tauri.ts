@@ -47,6 +47,8 @@ export interface CleanupPromptSections {
 	dictionary: PromptSection;
 }
 
+export type OverlayMode = "always" | "never" | "recording_only";
+
 export interface AppSettings {
 	toggle_hotkey: HotkeyConfig;
 	hold_hotkey: HotkeyConfig;
@@ -60,6 +62,7 @@ export interface AppSettings {
 	llm_model: string | null;
 	auto_mute_audio: boolean;
 	stt_timeout_seconds: number | null;
+	overlay_mode: OverlayMode;
 }
 
 // ============================================================================
@@ -207,6 +210,7 @@ export const tauriAPI = {
 			auto_mute_audio: (await store.get<boolean>("auto_mute_audio")) ?? false,
 			stt_timeout_seconds:
 				(await store.get<number | null>("stt_timeout_seconds")) ?? null,
+			overlay_mode: (await store.get<OverlayMode>("overlay_mode")) ?? "always",
 		};
 	},
 
@@ -282,6 +286,14 @@ export const tauriAPI = {
 		const store = await getStore();
 		await store.set("stt_timeout_seconds", timeoutSeconds);
 		await store.save();
+	},
+
+	async updateOverlayMode(mode: OverlayMode): Promise<void> {
+		const store = await getStore();
+		await store.set("overlay_mode", mode);
+		await store.save();
+		// Apply the mode immediately
+		await invoke("set_overlay_mode", { mode });
 	},
 
 	async isAudioMuteSupported(): Promise<boolean> {

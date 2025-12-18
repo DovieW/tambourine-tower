@@ -1,17 +1,26 @@
-import { Switch, Tooltip } from "@mantine/core";
+import { Select, Switch, Tooltip } from "@mantine/core";
 import {
 	useIsAudioMuteSupported,
 	useSettings,
 	useUpdateAutoMuteAudio,
+	useUpdateOverlayMode,
 	useUpdateSoundEnabled,
 } from "../../lib/queries";
+import type { OverlayMode } from "../../lib/tauri";
 import { DeviceSelector } from "../DeviceSelector";
+
+const OVERLAY_MODE_OPTIONS = [
+	{ value: "always", label: "Always visible" },
+	{ value: "recording_only", label: "Only when recording" },
+	{ value: "never", label: "Hidden" },
+];
 
 export function AudioSettings() {
 	const { data: settings, isLoading } = useSettings();
 	const { data: isAudioMuteSupported } = useIsAudioMuteSupported();
 	const updateSoundEnabled = useUpdateSoundEnabled();
 	const updateAutoMuteAudio = useUpdateAutoMuteAudio();
+	const updateOverlayMode = useUpdateOverlayMode();
 
 	const handleSoundToggle = (checked: boolean) => {
 		updateSoundEnabled.mutate(checked);
@@ -19,6 +28,12 @@ export function AudioSettings() {
 
 	const handleAutoMuteToggle = (checked: boolean) => {
 		updateAutoMuteAudio.mutate(checked);
+	};
+
+	const handleOverlayModeChange = (value: string | null) => {
+		if (value) {
+			updateOverlayMode.mutate(value as OverlayMode);
+		}
 	};
 
 	return (
@@ -63,6 +78,28 @@ export function AudioSettings() {
 							size="md"
 						/>
 					</Tooltip>
+				</div>
+				<div className="settings-row" style={{ marginTop: 16 }}>
+					<div>
+						<p className="settings-label">Overlay widget</p>
+						<p className="settings-description">
+							When to show the on-screen recording widget
+						</p>
+					</div>
+					<Select
+						data={OVERLAY_MODE_OPTIONS}
+						value={settings?.overlay_mode ?? "always"}
+						onChange={handleOverlayModeChange}
+						disabled={isLoading}
+						styles={{
+							input: {
+								backgroundColor: "var(--bg-elevated)",
+								borderColor: "var(--border-default)",
+								color: "var(--text-primary)",
+								minWidth: 180,
+							},
+						}}
+					/>
 				</div>
 			</div>
 		</div>

@@ -141,6 +141,17 @@ export function useUpdateAutoMuteAudio() {
 	});
 }
 
+export function useUpdateOverlayMode() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: (mode: "always" | "never" | "recording_only") =>
+			tauriAPI.updateOverlayMode(mode),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["settings"] });
+		},
+	});
+}
+
 export function useIsAudioMuteSupported() {
 	return useQuery({
 		queryKey: ["audioMuteSupported"],
