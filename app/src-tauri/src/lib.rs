@@ -276,31 +276,71 @@ fn stop_recording(
                 });
             }
 
-            let stt_start = std::time::Instant::now();
-            match pipeline_clone.stop_and_transcribe().await {
-                Ok(transcript) => {
-                    let stt_duration = stt_start.elapsed();
-                    log::info!("Transcription complete: {} chars", transcript.len());
+            match pipeline_clone.stop_and_transcribe_detailed().await {
+                Ok(result) => {
+                    log::info!("Transcription complete: {} chars", result.final_text.len());
 
-                    // Filter out Whisper hallucinations
-                    let filtered_transcript = filter_whisper_hallucinations(&transcript);
+                    // Filter out common Whisper hallucinations (applied to the pipeline's final text)
+                    let filtered_transcript = filter_whisper_hallucinations(&result.final_text);
 
-                    // Update request log store (always keep the raw transcript)
+                    // Update request log store
                     if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
                         log_store.with_current(|log| {
-                            log.raw_transcript = Some(transcript.clone());
-                            log.stt_duration_ms = Some(stt_duration.as_millis() as u64);
+                            // Raw STT output (pre-LLM)
+                            log.raw_transcript = Some(result.stt_text.clone());
 
+                            // Final output after pipeline + hallucination filtering (if any)
                             if let Some(ref text) = filtered_transcript {
-                                // No LLM formatting in this path; treat final text as the filtered output
                                 log.formatted_transcript = Some(text.clone());
                             }
 
+                            log.stt_duration_ms = Some(result.stt_duration_ms);
+                            log.llm_duration_ms = result.llm_duration_ms;
+
                             log.info(format!(
-                                "Transcription completed in {}ms ({} chars)",
-                                stt_duration.as_millis(),
-                                transcript.len()
+                                "STT completed in {}ms ({} chars)",
+                                result.stt_duration_ms,
+                                result.stt_text.len()
                             ));
+
+                            match &result.llm_outcome {
+                                pipeline::LlmOutcome::NotAttempted => {
+                                    log.info("LLM formatting not attempted (disabled or unavailable)");
+                                }
+                                pipeline::LlmOutcome::Succeeded => {
+                                    if let Some(ms) = result.llm_duration_ms {
+                                        log.info(format!(
+                                            "LLM formatting succeeded in {}ms ({} -> {} chars)",
+                                            ms,
+                                            result.stt_text.len(),
+                                            result.final_text.len()
+                                        ));
+                                    } else {
+                                        log.info("LLM formatting succeeded");
+                                    }
+                                }
+                                pipeline::LlmOutcome::TimedOut => {
+                                    if let Some(ms) = result.llm_duration_ms {
+                                        log.warn(format!(
+                                            "LLM formatting timed out after {}ms; fell back to STT transcript",
+                                            ms
+                                        ));
+                                    } else {
+                                        log.warn("LLM formatting timed out; fell back to STT transcript");
+                                    }
+                                }
+                                pipeline::LlmOutcome::Failed(err) => {
+                                    log.warn(format!(
+                                        "LLM formatting failed; fell back to STT transcript ({})",
+                                        err
+                                    ));
+                                }
+                            }
+
+                            if filtered_transcript.is_none() {
+                                log.warn("Transcript filtered as hallucination, nothing output");
+                            }
+
                             log.complete_success();
                         });
                         log_store.complete_current();
@@ -330,12 +370,6 @@ fn stop_recording(
                         // Emit empty transcript event so UI can update appropriately
                         let _ = app_clone.emit("pipeline-transcript-ready", "");
                         log::info!("Transcript filtered as hallucination, not outputting");
-
-                        if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
-                            log_store.with_current(|log| {
-                                log.warn("Transcript filtered as hallucination, nothing output");
-                            });
-                        }
                     }
 
                     // Hide overlay after transcription completes if in "recording_only" mode
@@ -843,6 +877,24 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
     let vad_settings: settings::VadSettings =
         get_setting_from_store(app, "vad_settings", settings::VadSettings::default());
 
+    // Read LLM settings from store
+    let llm_provider: Option<String> = get_setting_from_store(app, "llm_provider", None);
+    let llm_model: Option<String> = get_setting_from_store(app, "llm_model", None);
+
+    let llm_api_key: String = llm_provider
+        .as_deref()
+        .map(|provider| {
+            let key_name = format!("{}_api_key", provider);
+            get_setting_from_store(app, &key_name, String::new())
+        })
+        .unwrap_or_default();
+
+    let llm_enabled = match llm_provider.as_deref() {
+        None => false,
+        Some("ollama") => true,
+        Some(_) => !llm_api_key.is_empty(),
+    };
+
     let config = pipeline::PipelineConfig {
         stt_provider,
         stt_api_key,
@@ -852,7 +904,13 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
         vad_config: vad_settings.to_vad_auto_stop_config(),
         transcription_timeout: Duration::from_secs(60),
         max_recording_bytes: 50 * 1024 * 1024, // 50MB
-        llm_config: llm::LlmConfig::default(),
+        llm_config: llm::LlmConfig {
+            enabled: llm_enabled,
+            provider: llm_provider.unwrap_or_else(|| "openai".to_string()),
+            api_key: llm_api_key,
+            model: llm_model,
+            ..Default::default()
+        },
     };
 
     log::info!(

@@ -5,11 +5,13 @@
 //! configurable prompts to clean up and format transcribed speech.
 
 mod anthropic;
+mod groq;
 mod ollama;
 mod openai;
 mod prompts;
 
 pub use anthropic::AnthropicLlmProvider;
+pub use groq::GroqLlmProvider;
 pub use ollama::OllamaLlmProvider;
 pub use openai::OpenAiLlmProvider;
 pub use prompts::{

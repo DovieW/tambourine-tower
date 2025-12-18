@@ -4,9 +4,9 @@
 //! enabling voice dictation directly from the Tauri app.
 
 use crate::audio_capture::VadAutoStopConfig;
-use crate::pipeline::{PipelineConfig, PipelineError, PipelineState, SharedPipeline};
+use crate::pipeline::{LlmOutcome, PipelineConfig, PipelineError, PipelineState, SharedPipeline};
 use crate::request_log::RequestLogStore;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Tauri-compatible error type for commands
@@ -104,9 +104,8 @@ pub async fn pipeline_stop_and_transcribe(
         });
     }
 
-    let start_time = Instant::now();
-    let transcript = pipeline
-        .stop_and_transcribe()
+    let result = pipeline
+        .stop_and_transcribe_detailed()
         .await
         .map_err(|e| {
             if let Some(log_store) = app.try_state::<RequestLogStore>() {
@@ -119,27 +118,65 @@ pub async fn pipeline_stop_and_transcribe(
             CommandError::from(e)
         })?;
 
-    let duration = start_time.elapsed();
+    let final_text = result.final_text.clone();
 
     // Log success
     if let Some(log_store) = app.try_state::<RequestLogStore>() {
         log_store.with_current(|log| {
-            log.raw_transcript = Some(transcript.clone());
-            log.stt_duration_ms = Some(duration.as_millis() as u64);
+            log.raw_transcript = Some(result.stt_text.clone());
+            log.formatted_transcript = Some(result.final_text.clone());
+            log.stt_duration_ms = Some(result.stt_duration_ms);
+            log.llm_duration_ms = result.llm_duration_ms;
+
             log.info(format!(
-                "Transcription completed in {}ms ({} chars)",
-                duration.as_millis(),
-                transcript.len()
+                "STT completed in {}ms ({} chars)",
+                result.stt_duration_ms,
+                result.stt_text.len()
             ));
+
+            match &result.llm_outcome {
+                LlmOutcome::NotAttempted => {
+                    log.info("LLM formatting not attempted (disabled or unavailable)");
+                }
+                LlmOutcome::Succeeded => {
+                    if let Some(ms) = result.llm_duration_ms {
+                        log.info(format!(
+                            "LLM formatting succeeded in {}ms ({} -> {} chars)",
+                            ms,
+                            result.stt_text.len(),
+                            result.final_text.len()
+                        ));
+                    } else {
+                        log.info("LLM formatting succeeded");
+                    }
+                }
+                LlmOutcome::TimedOut => {
+                    if let Some(ms) = result.llm_duration_ms {
+                        log.warn(format!(
+                            "LLM formatting timed out after {}ms; fell back to STT transcript",
+                            ms
+                        ));
+                    } else {
+                        log.warn("LLM formatting timed out; fell back to STT transcript");
+                    }
+                }
+                LlmOutcome::Failed(err) => {
+                    log.warn(format!(
+                        "LLM formatting failed; fell back to STT transcript ({})",
+                        err
+                    ));
+                }
+            }
+
             log.complete_success();
         });
         log_store.complete_current();
     }
 
     // Emit transcript ready event
-    let _ = app.emit("pipeline-transcript-ready", &transcript);
+    let _ = app.emit("pipeline-transcript-ready", &final_text);
 
-    Ok(transcript)
+    Ok(final_text)
 }
 
 /// Cancel the current recording/transcription
@@ -259,10 +296,9 @@ pub async fn pipeline_dictate(
 
     // Stop and transcribe
     let _ = app.emit("pipeline-transcription-started", ());
-    let start_time = Instant::now();
 
-    let transcript = pipeline
-        .stop_and_transcribe()
+    let result = pipeline
+        .stop_and_transcribe_detailed()
         .await
         .map_err(|e| {
             if let Some(log_store) = app.try_state::<RequestLogStore>() {
@@ -275,20 +311,20 @@ pub async fn pipeline_dictate(
             CommandError::from(e)
         })?;
 
-    let duration = start_time.elapsed();
+    let final_text = result.final_text.clone();
 
     // Emit transcript ready event
-    let _ = app.emit("pipeline-transcript-ready", &transcript);
+    let _ = app.emit("pipeline-transcript-ready", &final_text);
 
     // Type the transcript
-    if !transcript.is_empty() {
+    if !final_text.is_empty() {
         if let Some(log_store) = app.try_state::<RequestLogStore>() {
             log_store.with_current(|log| {
                 log.info("Typing transcript...");
             });
         }
 
-        crate::commands::text::type_text(app.clone(), transcript.clone())
+        crate::commands::text::type_text(app.clone(), final_text.clone())
             .await
             .map_err(|e| {
                 if let Some(log_store) = app.try_state::<RequestLogStore>() {
@@ -303,19 +339,57 @@ pub async fn pipeline_dictate(
     // Log success
     if let Some(log_store) = app.try_state::<RequestLogStore>() {
         log_store.with_current(|log| {
-            log.raw_transcript = Some(transcript.clone());
-            log.stt_duration_ms = Some(duration.as_millis() as u64);
+            log.raw_transcript = Some(result.stt_text.clone());
+            log.formatted_transcript = Some(result.final_text.clone());
+            log.stt_duration_ms = Some(result.stt_duration_ms);
+            log.llm_duration_ms = result.llm_duration_ms;
+
             log.info(format!(
-                "Transcription completed in {}ms ({} chars)",
-                duration.as_millis(),
-                transcript.len()
+                "STT completed in {}ms ({} chars)",
+                result.stt_duration_ms,
+                result.stt_text.len()
             ));
+
+            match &result.llm_outcome {
+                LlmOutcome::NotAttempted => {
+                    log.info("LLM formatting not attempted (disabled or unavailable)");
+                }
+                LlmOutcome::Succeeded => {
+                    if let Some(ms) = result.llm_duration_ms {
+                        log.info(format!(
+                            "LLM formatting succeeded in {}ms ({} -> {} chars)",
+                            ms,
+                            result.stt_text.len(),
+                            result.final_text.len()
+                        ));
+                    } else {
+                        log.info("LLM formatting succeeded");
+                    }
+                }
+                LlmOutcome::TimedOut => {
+                    if let Some(ms) = result.llm_duration_ms {
+                        log.warn(format!(
+                            "LLM formatting timed out after {}ms; fell back to STT transcript",
+                            ms
+                        ));
+                    } else {
+                        log.warn("LLM formatting timed out; fell back to STT transcript");
+                    }
+                }
+                LlmOutcome::Failed(err) => {
+                    log.warn(format!(
+                        "LLM formatting failed; fell back to STT transcript ({})",
+                        err
+                    ));
+                }
+            }
+
             log.complete_success();
         });
         log_store.complete_current();
     }
 
-    Ok(transcript)
+    Ok(final_text)
 }
 
 /// Full pipeline helper: Start recording if not recording, or stop and transcribe if recording

@@ -169,172 +169,183 @@ function RequestLogItem({ log }: { log: RequestLog }) {
 	const hasLLM = log.llm_provider !== null;
 
 	return (
-		<Accordion.Item value={log.id}>
-			<Accordion.Control>
-				<Group justify="space-between" wrap="nowrap" pr="md">
-					<Group gap="sm" wrap="nowrap">
-						<Text size="sm" c="dimmed" ff="monospace">
-							{formatTimestamp(log.started_at)}
-						</Text>
-						{getStatusBadge(log.status)}
-					</Group>
-					<Group gap="xs" wrap="nowrap">
-						<Badge variant="light" size="sm">
-							STT: {log.stt_provider}
-							{log.stt_model && ` (${log.stt_model})`}
-						</Badge>
-						{hasLLM && (
-							<Badge variant="light" size="sm" color="violet">
-								LLM: {log.llm_provider}
-								{log.llm_model && ` (${log.llm_model})`}
-							</Badge>
-						)}
-						{log.stt_duration_ms && (
-							<Badge
-								variant="outline"
-								size="sm"
-								leftSection={<Clock size={10} />}
-							>
-								{formatDuration(log.stt_duration_ms)}
-							</Badge>
-						)}
-					</Group>
-				</Group>
-			</Accordion.Control>
-			<Accordion.Panel>
-				<Stack gap="md">
-					{/* Transcript info */}
-					{(log.raw_transcript || log.final_text) && (
-						<Paper withBorder p="sm">
-							<Stack gap="xs">
-								{log.raw_transcript && (
-									<Box>
-										<Text size="xs" fw={600} c="dimmed">
-											Raw Transcript:
-										</Text>
-										<Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-											{log.raw_transcript || "(empty)"}
-										</Text>
-									</Box>
-								)}
-								{log.final_text && log.final_text !== log.raw_transcript && (
-									<Box>
-										<Text size="xs" fw={600} c="dimmed">
-											After LLM Cleanup:
-										</Text>
-										<Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
-											{log.final_text}
-										</Text>
-									</Box>
-								)}
-							</Stack>
-						</Paper>
-					)}
+    <Accordion.Item value={log.id}>
+      <Accordion.Control>
+        <Group justify="space-between" wrap="nowrap" pr="md">
+          <Group gap="sm" wrap="nowrap">
+            <Text size="sm" c="dimmed" ff="monospace">
+              {formatTimestamp(log.started_at)}
+            </Text>
+            {getStatusBadge(log.status)}
+          </Group>
+          <Group gap="xs" wrap="nowrap">
+            <Badge variant="light" size="sm">
+              STT: {log.stt_provider}
+              {log.stt_model && ` (${log.stt_model})`}
+            </Badge>
+            {hasLLM && (
+              <Badge variant="light" size="sm" color="violet">
+                LLM: {log.llm_provider}
+                {log.llm_model && ` (${log.llm_model})`}
+              </Badge>
+            )}
+            {log.stt_duration_ms && (
+              <Badge
+                variant="outline"
+                size="sm"
+                leftSection={<Clock size={10} />}
+              >
+                {formatDuration(log.stt_duration_ms)}
+              </Badge>
+            )}
+            {log.llm_duration_ms && (
+              <Badge
+                variant="outline"
+                size="sm"
+                color="violet"
+                leftSection={<Clock size={10} />}
+              >
+                {formatDuration(log.llm_duration_ms)}
+              </Badge>
+            )}
+          </Group>
+        </Group>
+      </Accordion.Control>
+      <Accordion.Panel>
+        <Stack gap="md">
+          {/* Transcript info */}
+          {(log.raw_transcript || log.final_text) && (
+            <Paper withBorder p="sm">
+              <Stack gap="xs">
+                {log.raw_transcript && (
+                  <Box>
+                    <Text size="xs" fw={600} c="dimmed">
+                      Raw Transcript:
+                    </Text>
+                    <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                      {log.raw_transcript || "(empty)"}
+                    </Text>
+                  </Box>
+                )}
+                {log.final_text &&
+                  (log.final_text !== log.raw_transcript || hasLLM) && (
+                    <Box>
+                      <Text size="xs" fw={600} c="dimmed">
+                        Final Output:
+                      </Text>
+                      <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                        {log.final_text}
+                      </Text>
+                    </Box>
+                  )}
+              </Stack>
+            </Paper>
+          )}
 
-					{/* Error message */}
-					{log.error_message && (
-						<Paper
-							withBorder
-							p="sm"
-							style={{ borderColor: "var(--mantine-color-red-5)" }}
-						>
-							<Group gap="xs" align="flex-start" justify="space-between">
-								<Group gap="xs" align="flex-start" style={{ flex: 1 }}>
-									<AlertCircle
-										size={16}
-										style={{
-											color: "var(--mantine-color-red-5)",
-											flexShrink: 0,
-										}}
-									/>
-									<Box style={{ flex: 1 }}>
-										<Text size="xs" fw={600} c="red">
-											Error:
-										</Text>
-										<Text size="sm" c="red" style={{ wordBreak: "break-word" }}>
-											{log.error_message}
-										</Text>
-									</Box>
-								</Group>
-								<CopyButton value={log.error_message}>
-									{({ copied, copy }) => (
-										<Tooltip label={copied ? "Copied!" : "Copy error"}>
-											<ActionIcon
-												variant="subtle"
-												color={copied ? "teal" : "gray"}
-												onClick={copy}
-												size="sm"
-											>
-												<Copy size={14} />
-											</ActionIcon>
-										</Tooltip>
-									)}
-								</CopyButton>
-							</Group>
-						</Paper>
-					)}
+          {/* Error message */}
+          {log.error_message && (
+            <Paper
+              withBorder
+              p="sm"
+              style={{ borderColor: "var(--mantine-color-red-5)" }}
+            >
+              <Group gap="xs" align="flex-start" justify="space-between">
+                <Group gap="xs" align="flex-start" style={{ flex: 1 }}>
+                  <AlertCircle
+                    size={16}
+                    style={{
+                      color: "var(--mantine-color-red-5)",
+                      flexShrink: 0,
+                    }}
+                  />
+                  <Box style={{ flex: 1 }}>
+                    <Text size="xs" fw={600} c="red">
+                      Error:
+                    </Text>
+                    <Text size="sm" c="red" style={{ wordBreak: "break-word" }}>
+                      {log.error_message}
+                    </Text>
+                  </Box>
+                </Group>
+                <CopyButton value={log.error_message}>
+                  {({ copied, copy }) => (
+                    <Tooltip label={copied ? "Copied!" : "Copy error"}>
+                      <ActionIcon
+                        variant="subtle"
+                        color={copied ? "teal" : "gray"}
+                        onClick={copy}
+                        size="sm"
+                      >
+                        <Copy size={14} />
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
+                </CopyButton>
+              </Group>
+            </Paper>
+          )}
 
-					{/* Timing info */}
-					{(log.stt_duration_ms || log.llm_duration_ms) && (
-						<Group gap="lg">
-							{log.stt_duration_ms && (
-								<Text size="xs" c="dimmed">
-									STT Duration:{" "}
-									<strong>{formatDuration(log.stt_duration_ms)}</strong>
-								</Text>
-							)}
-							{log.llm_duration_ms && (
-								<Text size="xs" c="dimmed">
-									LLM Duration:{" "}
-									<strong>{formatDuration(log.llm_duration_ms)}</strong>
-								</Text>
-							)}
-						</Group>
-					)}
+          {/* Timing info */}
+          {(log.stt_duration_ms || log.llm_duration_ms) && (
+            <Group gap="lg">
+              {log.stt_duration_ms && (
+                <Text size="xs" c="dimmed">
+                  STT Duration:{" "}
+                  <strong>{formatDuration(log.stt_duration_ms)}</strong>
+                </Text>
+              )}
+              {log.llm_duration_ms && (
+                <Text size="xs" c="dimmed">
+                  LLM Duration:{" "}
+                  <strong>{formatDuration(log.llm_duration_ms)}</strong>
+                </Text>
+              )}
+            </Group>
+          )}
 
-					{/* Log entries */}
-					{log.entries.length > 0 && (
-						<Box>
-							<Text size="xs" fw={600} c="dimmed" mb="xs">
-								Log Entries ({log.entries.length}):
-							</Text>
-							<Paper
-								withBorder
-								p="sm"
-								style={{ background: "var(--mantine-color-dark-8)" }}
-							>
-								<Stack gap={4}>
-									{log.entries.map((entry, index) => (
-										<LogEntryItem
-											key={`${entry.timestamp}-${index}`}
-											entry={entry}
-										/>
-									))}
-								</Stack>
-							</Paper>
-						</Box>
-					)}
+          {/* Log entries */}
+          {log.entries.length > 0 && (
+            <Box>
+              <Text size="xs" fw={600} c="dimmed" mb="xs">
+                Log Entries ({log.entries.length}):
+              </Text>
+              <Paper
+                withBorder
+                p="sm"
+                style={{ background: "var(--mantine-color-dark-8)" }}
+              >
+                <Stack gap={4}>
+                  {log.entries.map((entry, index) => (
+                    <LogEntryItem
+                      key={`${entry.timestamp}-${index}`}
+                      entry={entry}
+                    />
+                  ))}
+                </Stack>
+              </Paper>
+            </Box>
+          )}
 
-					{/* Copy full log as JSON for debugging */}
-					<Group justify="flex-end">
-						<CopyButton value={JSON.stringify(log, null, 2)}>
-							{({ copied, copy }) => (
-								<Button
-									variant="subtle"
-									color={copied ? "teal" : "gray"}
-									size="xs"
-									leftSection={<Copy size={14} />}
-									onClick={copy}
-								>
-									{copied ? "Copied!" : "Copy Full Log (JSON)"}
-								</Button>
-							)}
-						</CopyButton>
-					</Group>
-				</Stack>
-			</Accordion.Panel>
-		</Accordion.Item>
-	);
+          {/* Copy full log as JSON for debugging */}
+          <Group justify="flex-end">
+            <CopyButton value={JSON.stringify(log, null, 2)}>
+              {({ copied, copy }) => (
+                <Button
+                  variant="subtle"
+                  color={copied ? "teal" : "gray"}
+                  size="xs"
+                  leftSection={<Copy size={14} />}
+                  onClick={copy}
+                >
+                  {copied ? "Copied!" : "Copy Full Log (JSON)"}
+                </Button>
+              )}
+            </CopyButton>
+          </Group>
+        </Stack>
+      </Accordion.Panel>
+    </Accordion.Item>
+  );
 }
 
 export function LogsView() {

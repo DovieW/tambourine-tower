@@ -303,22 +303,29 @@ export function useUpdateSTTModel() {
 export function useUpdateLLMProvider() {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (provider: string | null) =>
-			tauriAPI.updateLLMProvider(provider),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+    mutationFn: async (provider: string | null) => {
+      await tauriAPI.updateLLMProvider(provider);
+      // Sync the pipeline configuration when LLM provider changes
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateLLMModel() {
 	const queryClient = useQueryClient();
 	return useMutation({
-		mutationFn: (model: string | null) => tauriAPI.updateLLMModel(model),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+    mutationFn: async (model: string | null) => {
+      await tauriAPI.updateLLMModel(model);
+      // Sync the pipeline configuration when LLM model changes
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 // STT Timeout mutation (local settings)

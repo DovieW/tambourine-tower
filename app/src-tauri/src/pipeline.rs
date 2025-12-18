@@ -17,8 +17,8 @@
 
 use crate::audio_capture::{AudioCapture, AudioCaptureError, AudioCaptureEvent, VadAutoStopConfig};
 use crate::llm::{
-    combine_prompt_sections, format_text, AnthropicLlmProvider, LlmConfig, LlmError, LlmProvider,
-    OllamaLlmProvider, OpenAiLlmProvider, PromptSections,
+    format_text, AnthropicLlmProvider, GroqLlmProvider, LlmConfig, LlmError, LlmProvider,
+    OllamaLlmProvider, OpenAiLlmProvider,
 };
 use crate::stt::{AudioFormat, RetryConfig, SttError, SttRegistry, with_retry};
 use std::sync::{Arc, Mutex};
@@ -111,6 +111,45 @@ pub enum PipelineEvent {
     TranscriptReady(String),
     /// An error occurred
     Error(String),
+}
+
+/// Outcome of the optional LLM formatting step.
+#[derive(Debug, Clone)]
+pub enum LlmOutcome {
+    /// LLM step was not attempted (not configured or disabled).
+    NotAttempted,
+    /// LLM step completed successfully and returned formatted text.
+    Succeeded,
+    /// LLM step timed out and the pipeline fell back to the raw STT transcript.
+    TimedOut,
+    /// LLM step failed and the pipeline fell back to the raw STT transcript.
+    Failed(String),
+}
+
+/// Detailed result for a transcription request.
+///
+/// This separates the raw STT transcript from the final output (which may
+/// include LLM formatting and/or fallbacks).
+#[derive(Debug, Clone)]
+pub struct TranscriptionResult {
+    /// Raw transcript as returned from the STT provider (before any LLM formatting).
+    pub stt_text: String,
+    /// Final output text returned by the pipeline.
+    /// If LLM formatting was disabled, this will match `stt_text`.
+    /// If LLM formatting failed/timed out, this falls back to `stt_text`.
+    pub final_text: String,
+    /// Duration of the STT phase (including retries), in milliseconds.
+    pub stt_duration_ms: u64,
+    /// Duration of the LLM phase (including timeout/fallback), in milliseconds.
+    pub llm_duration_ms: Option<u64>,
+    /// Outcome of the LLM phase.
+    pub llm_outcome: LlmOutcome,
+}
+
+impl TranscriptionResult {
+    pub fn llm_attempted(&self) -> bool {
+        !matches!(self.llm_outcome, LlmOutcome::NotAttempted)
+    }
 }
 
 /// Configuration for the recording pipeline
@@ -278,6 +317,14 @@ fn create_llm_provider(config: &LlmConfig) -> Arc<dyn LlmProvider> {
             };
             Arc::new(provider.with_timeout(config.timeout))
         }
+        "groq" => {
+            let provider = if let Some(model) = &config.model {
+                GroqLlmProvider::with_model(config.api_key.clone(), model.clone())
+            } else {
+                GroqLlmProvider::new(config.api_key.clone())
+            };
+            Arc::new(provider.with_timeout(config.timeout))
+        }
         "ollama" => {
             let provider = OllamaLlmProvider::with_url(
                 config
@@ -379,7 +426,7 @@ impl SharedPipeline {
         }
     }
 
-    /// Stop recording and transcribe the audio
+    /// Stop recording and transcribe the audio, returning a detailed result.
     ///
     /// This is the main end-to-end function for voice dictation.
     /// Includes:
@@ -388,7 +435,9 @@ impl SharedPipeline {
     /// - Cancellation support
     /// - Proper error recovery
     /// - Optional LLM formatting
-    pub async fn stop_and_transcribe(&self) -> Result<String, PipelineError> {
+    pub async fn stop_and_transcribe_detailed(
+        &self,
+    ) -> Result<TranscriptionResult, PipelineError> {
         // Phase 1: Stop recording and prepare for transcription (synchronous, holds lock briefly)
         let (wav_bytes, stt_provider, llm_provider, llm_prompts, retry_config, timeout, cancel_token) = {
             let mut inner = self.inner.lock().map_err(|e| PipelineError::Lock(e.to_string()))?;
@@ -453,6 +502,7 @@ impl SharedPipeline {
         };
 
         // Race between transcription, timeout, and cancellation
+        let stt_start = std::time::Instant::now();
         let stt_result = tokio::select! {
             biased;
 
@@ -474,23 +524,33 @@ impl SharedPipeline {
             }
         };
 
-        // If STT failed, update state and return error
-        if let Err(e) = &stt_result {
-            let mut inner = self.inner.lock().map_err(|err| PipelineError::Lock(err.to_string()))?;
-            if matches!(e, PipelineError::Cancelled) {
-                inner.reset_to_idle();
-            } else {
-                inner.set_error(&e.to_string());
+        let stt_text = match stt_result {
+            Ok(t) => t,
+            Err(e) => {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|err| PipelineError::Lock(err.to_string()))?;
+                if matches!(e, PipelineError::Cancelled) {
+                    inner.reset_to_idle();
+                } else {
+                    inner.set_error(&e.to_string());
+                }
+                return Err(e);
             }
-            return stt_result;
-        }
-
-        let transcript = stt_result.unwrap();
-        log::info!("Pipeline: STT complete, {} chars", transcript.len());
+        };
+        let stt_duration_ms = stt_start.elapsed().as_millis() as u64;
+        log::info!("Pipeline: STT complete, {} chars", stt_text.len());
 
         // Phase 3: Optional LLM formatting
+        let mut llm_duration_ms: Option<u64> = None;
+        let mut llm_outcome: LlmOutcome = LlmOutcome::NotAttempted;
+
         let final_text = if let Some(llm) = llm_provider {
             log::info!("Pipeline: Applying LLM formatting");
+
+            llm_outcome = LlmOutcome::Succeeded; // may be overwritten by fallback paths
+            let llm_start = std::time::Instant::now();
 
             // Apply LLM formatting with timeout
             let llm_timeout = Duration::from_secs(30);
@@ -505,23 +565,27 @@ impl SharedPipeline {
                 _ = tokio::time::sleep(llm_timeout) => {
                     log::warn!("Pipeline: LLM formatting timed out, using raw transcript");
                     // On timeout, fall back to raw transcript instead of failing
-                    Ok(transcript.clone())
+                    llm_outcome = LlmOutcome::TimedOut;
+                    Ok(stt_text.clone())
                 }
 
-                result = format_text(llm.as_ref(), &transcript, &llm_prompts) => {
+                result = format_text(llm.as_ref(), &stt_text, &llm_prompts) => {
                     match result {
                         Ok(formatted) => {
-                            log::info!("Pipeline: LLM formatted {} -> {} chars", transcript.len(), formatted.len());
+                            log::info!("Pipeline: LLM formatted {} -> {} chars", stt_text.len(), formatted.len());
                             Ok(formatted)
                         }
                         Err(e) => {
                             log::warn!("Pipeline: LLM formatting failed ({}), using raw transcript", e);
                             // On error, fall back to raw transcript instead of failing
-                            Ok(transcript.clone())
+                            llm_outcome = LlmOutcome::Failed(e.to_string());
+                            Ok(stt_text.clone())
                         }
                     }
                 }
             };
+
+            llm_duration_ms = Some(llm_start.elapsed().as_millis() as u64);
 
             match llm_result {
                 Ok(text) => text,
@@ -530,10 +594,10 @@ impl SharedPipeline {
                     inner.reset_to_idle();
                     return Err(PipelineError::Cancelled);
                 }
-                Err(_) => transcript, // Fallback on other errors
+                Err(_) => stt_text.clone(), // Fallback on other errors
             }
         } else {
-            transcript
+            stt_text.clone()
         };
 
         // Phase 4: Update state to idle
@@ -543,7 +607,22 @@ impl SharedPipeline {
             log::info!("Pipeline: Complete, {} chars output", final_text.len());
         }
 
-        Ok(final_text)
+        Ok(TranscriptionResult {
+            stt_text,
+            final_text,
+            stt_duration_ms,
+            llm_duration_ms,
+            llm_outcome,
+        })
+    }
+
+    /// Stop recording and transcribe the audio.
+    ///
+    /// Kept for backwards compatibility. Prefer `stop_and_transcribe_detailed`.
+    pub async fn stop_and_transcribe(&self) -> Result<String, PipelineError> {
+        self.stop_and_transcribe_detailed()
+            .await
+            .map(|r| r.final_text)
     }
 
     /// Update configuration

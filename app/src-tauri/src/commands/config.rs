@@ -277,12 +277,12 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
     };
 
     // Read LLM settings from store
-    let llm_provider: String = app
+    // NOTE: If the user has not selected an LLM provider yet, keep LLM disabled.
+    let llm_provider: Option<String> = app
         .store("settings.json")
         .ok()
         .and_then(|store| store.get("llm_provider"))
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_else(|| "groq".to_string());
+        .and_then(|v| serde_json::from_value(v).ok());
 
     let llm_model: Option<String> = app
         .store("settings.json")
@@ -290,13 +290,22 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         .and_then(|store| store.get("llm_model"))
         .and_then(|v| serde_json::from_value(v).ok());
 
-    let llm_api_key: String = {
-        let key_name = format!("{}_api_key", llm_provider);
-        app.store("settings.json")
-            .ok()
-            .and_then(|store| store.get(&key_name))
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default()
+    let llm_api_key: String = llm_provider
+        .as_deref()
+        .map(|provider| {
+            let key_name = format!("{}_api_key", provider);
+            app.store("settings.json")
+                .ok()
+                .and_then(|store| store.get(&key_name))
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    let llm_enabled = match llm_provider.as_deref() {
+        None => false,
+        Some("ollama") => true, // local
+        Some(_) => !llm_api_key.is_empty(),
     };
 
     // Read VAD settings from store
@@ -317,7 +326,8 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         transcription_timeout: std::time::Duration::from_secs(60),
         max_recording_bytes: 50 * 1024 * 1024, // 50MB
         llm_config: crate::llm::LlmConfig {
-            provider: llm_provider.clone(),
+            enabled: llm_enabled,
+            provider: llm_provider.clone().unwrap_or_else(|| "openai".to_string()),
             api_key: llm_api_key,
             model: llm_model.clone(),
             ..Default::default()
@@ -333,7 +343,7 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
             "Pipeline config synced - STT: {} ({}), LLM: {} ({}), VAD: {}",
             stt_provider,
             stt_model.as_deref().unwrap_or("default"),
-            llm_provider,
+            llm_provider.clone().unwrap_or_else(|| "disabled".to_string()),
             llm_model.as_deref().unwrap_or("default"),
             vad_settings.enabled
         );
