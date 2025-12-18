@@ -13,11 +13,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-windows:
+  test-windows:
     runs-on: windows-latest
 
     env:
       CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
       - name: Checkout
@@ -65,15 +67,73 @@ jobs:
         with:
           profile: minimal
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             app/src-tauri -> target
 
-      - name: Run Rust tests
+      - name: Run Rust tests (release)
         working-directory: app/src-tauri
-        run: cargo test --lib
+        run: cargo test --lib --release
+
+  build-windows:
+    runs-on: windows-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable pnpm (Corepack)
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.5 --activate
+          pnpm -v
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "store_path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('app/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install app dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            app/src-tauri -> target
 
       - name: Build Tauri app (release)
         working-directory: app
