@@ -196,20 +196,39 @@ pub struct PromptSectionSetting {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CleanupPromptSectionsSetting {
-    pub main: PromptSectionSetting,
-    pub advanced: PromptSectionSetting,
-    pub dictionary: PromptSectionSetting,
+    /// Per-section overrides. If a section is None/missing, it inherits from the base prompts.
+    #[serde(default)]
+    pub main: Option<PromptSectionSetting>,
+    #[serde(default)]
+    pub advanced: Option<PromptSectionSetting>,
+    #[serde(default)]
+    pub dictionary: Option<PromptSectionSetting>,
 }
 
-impl From<CleanupPromptSectionsSetting> for PromptSections {
-    fn from(value: CleanupPromptSectionsSetting) -> Self {
-        Self {
-            main_custom: value.main.content,
-            advanced_enabled: value.advanced.enabled,
-            advanced_custom: value.advanced.content,
-            dictionary_enabled: value.dictionary.enabled,
-            dictionary_custom: value.dictionary.content,
+impl CleanupPromptSectionsSetting {
+    /// Apply these overrides on top of a base `PromptSections`.
+    ///
+    /// - Any missing section inherits from `base`.
+    /// - `content: None` means "use built-in default prompt for that section".
+    pub fn apply_to(&self, base: &PromptSections) -> PromptSections {
+        let mut next = base.clone();
+
+        if let Some(main) = &self.main {
+            // Main section is always included; `enabled` is ignored.
+            next.main_custom = main.content.clone();
         }
+
+        if let Some(advanced) = &self.advanced {
+            next.advanced_enabled = advanced.enabled;
+            next.advanced_custom = advanced.content.clone();
+        }
+
+        if let Some(dictionary) = &self.dictionary {
+            next.dictionary_enabled = dictionary.enabled;
+            next.dictionary_custom = dictionary.content.clone();
+        }
+
+        next
     }
 }
 

@@ -361,7 +361,8 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         .and_then(|v| serde_json::from_value(v).ok());
 
     let base_prompts: crate::llm::PromptSections = cleanup_prompt_sections
-        .map(Into::into)
+        .as_ref()
+        .map(|o| o.apply_to(&crate::llm::PromptSections::default()))
         .unwrap_or_else(crate::llm::PromptSections::default);
 
     let rewrite_program_prompt_profiles: Vec<crate::settings::RewriteProgramPromptProfile> = app
@@ -380,7 +381,8 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
                 program_paths: p.program_paths,
                 prompts: p
                     .cleanup_prompt_sections
-                    .map(Into::into)
+                    .as_ref()
+                    .map(|o| o.apply_to(&base_prompts))
                     .unwrap_or_else(|| base_prompts.clone()),
                 rewrite_llm_enabled: p.rewrite_llm_enabled,
                 stt_provider: p.stt_provider,

@@ -412,6 +412,14 @@ body {
 	border-bottom: 1px solid var(--border-subtle);
 }
 
+/*
+ * Utility: some rows are immediately followed by a Mantine <Divider>,
+ * which already renders its own separator line.
+ */
+.settings-row.no-divider {
+	border-bottom: none;
+}
+
 .settings-row:last-child {
 	border-bottom: none;
 }

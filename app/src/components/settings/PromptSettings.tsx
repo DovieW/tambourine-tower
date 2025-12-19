@@ -6,16 +6,14 @@ import {
   Group,
   Loader,
   Modal,
+  NumberInput,
   Select,
-  Slider,
   Switch,
-  Tabs,
   Text,
-  TextInput,
   Tooltip,
 } from "@mantine/core";
+import { Info, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Crosshair, Plus, Trash2 } from "lucide-react";
 import {
   useDefaultSections,
   useSettings,
@@ -31,11 +29,15 @@ import {
 } from "../../lib/queries";
 import {
   type CleanupPromptSections,
-  type OpenWindowInfo,
+  type CleanupPromptSectionsOverride,
   type RewriteProgramPromptProfile,
   tauriAPI,
 } from "../../lib/tauri";
 import { PromptSectionEditor } from "./PromptSectionEditor";
+
+const INHERIT_TOOLTIP = "Inheriting from Default profile";
+
+// (debug logging removed)
 
 const DEFAULT_SECTIONS: CleanupPromptSections = {
   main: { enabled: true, content: null },
@@ -107,7 +109,11 @@ function createId(): string {
   );
 }
 
-export function PromptSettings() {
+export function PromptSettings({
+  editingProfileId,
+}: {
+  editingProfileId?: string;
+}) {
   const { data: settings, isLoading: isLoadingSettings } = useSettings();
   const { data: defaultSections, isLoading: isLoadingDefaultSections } =
     useDefaultSections();
@@ -125,27 +131,18 @@ export function PromptSettings() {
   const updateLLMModel = useUpdateLLMModel();
   const updateSTTTimeout = useUpdateSTTTimeout();
 
-  const [activeProfileId, setActiveProfileId] = useState<string>("default");
+  const activeProfileId = editingProfileId ?? "default";
 
   const profiles: RewriteProgramPromptProfile[] =
     settings?.rewrite_program_prompt_profiles ?? [];
-  const [pendingNewProfile, setPendingNewProfile] =
-    useState<RewriteProgramPromptProfile | null>(null);
-  const uiProfiles = useMemo(() => {
-    if (!pendingNewProfile) return profiles;
-    if (profiles.some((p) => p.id === pendingNewProfile.id)) return profiles;
-    return [...profiles, pendingNewProfile];
-  }, [profiles, pendingNewProfile]);
 
   const activeProfile =
     activeProfileId === "default"
       ? null
-      : uiProfiles.find((p) => p.id === activeProfileId) ?? null;
+      : profiles.find((p) => p.id === activeProfileId) ?? null;
 
   const defaultRewriteEnabled = settings?.rewrite_llm_enabled ?? false;
 
-  const [localProfileName, setLocalProfileName] = useState<string>("");
-  const [localProfilePaths, setLocalProfilePaths] = useState<string[]>([]);
   const [localProfileSttProvider, setLocalProfileSttProvider] = useState<
     string | null
   >(null);
@@ -160,31 +157,30 @@ export function PromptSettings() {
   >(null);
   const [localProfileRewriteEnabled, setLocalProfileRewriteEnabled] =
     useState<boolean>(false);
-  const [localProfileSttTimeout, setLocalProfileSttTimeout] =
-    useState<number>(DEFAULT_STT_TIMEOUT);
+  const [localProfileSttTimeout, setLocalProfileSttTimeout] = useState<
+    string | number
+  >(DEFAULT_STT_TIMEOUT);
 
-  const [windowPickerOpen, setWindowPickerOpen] = useState(false);
-  const [windowPickerDropdownOpened, setWindowPickerDropdownOpened] =
+  const [resetDialog, setResetDialog] = useState<null | {
+    title: string;
+    onConfirm: () => void;
+  }>(null);
+
+  const openDisableOverrideDialog = (args: {
+    title: string;
+    onConfirm: () => void;
+  }) => {
+    setResetDialog(args);
+  };
+
+  // Track whether profile settings are inheriting (original value was null)
+  const [sttProviderInheriting, setSttProviderInheriting] = useState(false);
+  const [sttModelInheriting, setSttModelInheriting] = useState(false);
+  const [sttTimeoutInheriting, setSttTimeoutInheriting] = useState(false);
+  const [llmProviderInheriting, setLlmProviderInheriting] = useState(false);
+  const [llmModelInheriting, setLlmModelInheriting] = useState(false);
+  const [rewriteEnabledInheriting, setRewriteEnabledInheriting] =
     useState(false);
-  const [openWindows, setOpenWindows] = useState<OpenWindowInfo[]>([]);
-  const [isLoadingWindows, setIsLoadingWindows] = useState(false);
-
-  const windowPickerOptions = useMemo(() => {
-    // Mantine Select requires unique `value`s. Many apps (Chrome, VS Code, etc.)
-    // can have multiple windows with the same executable path, so we collapse
-    // those into a single option.
-    const byPath = new Map<string, OpenWindowInfo>();
-    for (const w of openWindows) {
-      if (!byPath.has(w.process_path)) {
-        byPath.set(w.process_path, w);
-      }
-    }
-
-    return Array.from(byPath.values()).map((w) => ({
-      value: w.process_path,
-      label: `${w.title} — ${w.process_path}`,
-    }));
-  }, [openWindows]);
 
   // NOTE: Settings tabs unmount when switching (keepMounted=false). If we render
   // switches immediately, they first render with placeholder values then “jump”
@@ -194,56 +190,96 @@ export function PromptSettings() {
     null
   );
 
+  // When updating per-section prompt overrides quickly (e.g., toggling Advanced then
+  // Dictionary immediately), relying on `activeProfile` can drop earlier changes
+  // because the component may not have re-rendered with the optimistic update yet.
+  // Keep a ref of the latest per-profile prompt overrides to merge safely.
+  const profilePromptOverridesRef =
+    useRef<CleanupPromptSectionsOverride | null>(null);
+
+  useEffect(() => {
+    profilePromptOverridesRef.current =
+      activeProfile?.cleanup_prompt_sections ?? null;
+  }, [activeProfileId, activeProfile?.cleanup_prompt_sections]);
+
   useEffect(() => {
     if (settings !== undefined && defaultSections !== undefined) {
-      // Ensure the active tab always exists.
-      if (
-        activeProfileId !== "default" &&
-        !uiProfiles.some((p) => p.id === activeProfileId)
-      ) {
-        setActiveProfileId("default");
-        return;
-      }
+      const base = settings.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
 
-      const sections =
+      const profileOverrides: CleanupPromptSectionsOverride | null | undefined =
         activeProfileId === "default"
-          ? settings.cleanup_prompt_sections ?? DEFAULT_SECTIONS
-          : uiProfiles.find((p) => p.id === activeProfileId)
-              ?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
+          ? null
+          : profiles.find((p) => p.id === activeProfileId)
+              ?.cleanup_prompt_sections;
+
+      const resolved: CleanupPromptSections =
+        activeProfileId === "default"
+          ? base
+          : {
+              main: profileOverrides?.main ?? base.main,
+              advanced: profileOverrides?.advanced ?? base.advanced,
+              dictionary: profileOverrides?.dictionary ?? base.dictionary,
+            };
 
       setLocalSections({
         main: {
-          enabled: sections.main.enabled,
-          content: sections.main.content ?? defaultSections.main,
+          enabled: resolved.main.enabled,
+          content: resolved.main.content ?? defaultSections.main,
         },
         advanced: {
-          enabled: sections.advanced.enabled,
-          content: sections.advanced.content ?? defaultSections.advanced,
+          enabled: resolved.advanced.enabled,
+          content: resolved.advanced.content ?? defaultSections.advanced,
         },
         dictionary: {
-          enabled: sections.dictionary.enabled,
-          content: sections.dictionary.content ?? defaultSections.dictionary,
+          enabled: resolved.dictionary.enabled,
+          content: resolved.dictionary.content ?? defaultSections.dictionary,
         },
       });
     }
-  }, [settings, defaultSections, activeProfileId, uiProfiles]);
-
-  // When the persisted settings include the newly-created profile, drop the optimistic copy.
-  useEffect(() => {
-    if (!pendingNewProfile) return;
-    if (profiles.some((p) => p.id === pendingNewProfile.id)) {
-      setPendingNewProfile(null);
-    }
-  }, [profiles, pendingNewProfile]);
+  }, [settings, defaultSections, activeProfileId, profiles]);
 
   useEffect(() => {
     if (activeProfile) {
-      setLocalProfileName(activeProfile.name);
-      setLocalProfilePaths(activeProfile.program_paths ?? []);
-      setLocalProfileSttProvider(activeProfile.stt_provider ?? null);
-      setLocalProfileSttModel(activeProfile.stt_model ?? null);
-      setLocalProfileLlmProvider(activeProfile.llm_provider ?? null);
-      setLocalProfileLlmModel(activeProfile.llm_model ?? null);
+      // Track whether each setting is inheriting (null in the profile)
+      const sttProviderIsNull =
+        activeProfile.stt_provider === null ||
+        activeProfile.stt_provider === undefined;
+      const sttModelIsNull =
+        activeProfile.stt_model === null ||
+        activeProfile.stt_model === undefined;
+      const sttTimeoutIsNull =
+        activeProfile.stt_timeout_seconds === null ||
+        activeProfile.stt_timeout_seconds === undefined;
+      const llmProviderIsNull =
+        activeProfile.llm_provider === null ||
+        activeProfile.llm_provider === undefined;
+      const llmModelIsNull =
+        activeProfile.llm_model === null ||
+        activeProfile.llm_model === undefined;
+      const rewriteEnabledIsNull =
+        activeProfile.rewrite_llm_enabled === null ||
+        activeProfile.rewrite_llm_enabled === undefined;
+
+      setSttProviderInheriting(sttProviderIsNull);
+      setSttModelInheriting(sttModelIsNull);
+      setSttTimeoutInheriting(sttTimeoutIsNull);
+      setLlmProviderInheriting(llmProviderIsNull);
+      setLlmModelInheriting(llmModelIsNull);
+      setRewriteEnabledInheriting(rewriteEnabledIsNull);
+
+      // Set local state (falling back to global defaults for display)
+      setLocalProfileSttProvider(
+        activeProfile.stt_provider ?? settings?.stt_provider ?? null
+      );
+      setLocalProfileSttModel(
+        activeProfile.stt_model ?? settings?.stt_model ?? null
+      );
+      setLocalProfileLlmProvider(
+        activeProfile.llm_provider ?? settings?.llm_provider ?? null
+      );
+      setLocalProfileLlmModel(
+        activeProfile.llm_model ?? settings?.llm_model ?? null
+      );
       setLocalProfileRewriteEnabled(
         activeProfile.rewrite_llm_enabled ?? defaultRewriteEnabled
       );
@@ -253,8 +289,14 @@ export function PromptSettings() {
           DEFAULT_STT_TIMEOUT
       );
     } else {
-      setLocalProfileName("");
-      setLocalProfilePaths([]);
+      // Default scope - not inheriting
+      setSttProviderInheriting(false);
+      setSttModelInheriting(false);
+      setSttTimeoutInheriting(false);
+      setLlmProviderInheriting(false);
+      setLlmModelInheriting(false);
+      setRewriteEnabledInheriting(false);
+
       setLocalProfileSttProvider(null);
       setLocalProfileSttModel(null);
       setLocalProfileLlmProvider(null);
@@ -268,6 +310,10 @@ export function PromptSettings() {
     activeProfileId,
     activeProfile,
     settings?.stt_timeout_seconds,
+    settings?.stt_provider,
+    settings?.stt_model,
+    settings?.llm_provider,
+    settings?.llm_model,
     defaultRewriteEnabled,
   ]);
 
@@ -358,15 +404,28 @@ export function PromptSettings() {
     ? LLM_MODELS[effectiveLlmProvider] ?? []
     : [];
 
-  const storedSections: CleanupPromptSections | null | undefined =
-    activeProfileId === "default"
-      ? settings?.cleanup_prompt_sections
-      : activeProfile?.cleanup_prompt_sections;
+  const baseStoredSections: CleanupPromptSections =
+    settings?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
+
+  const storedSectionsResolved: CleanupPromptSections =
+    activeProfileId === "default" || !activeProfile
+      ? baseStoredSections
+      : {
+          main:
+            activeProfile.cleanup_prompt_sections?.main ??
+            baseStoredSections.main,
+          advanced:
+            activeProfile.cleanup_prompt_sections?.advanced ??
+            baseStoredSections.advanced,
+          dictionary:
+            activeProfile.cleanup_prompt_sections?.dictionary ??
+            baseStoredSections.dictionary,
+        };
 
   const hasCustomContent = {
-    main: Boolean(storedSections?.main?.content),
-    advanced: Boolean(storedSections?.advanced?.content),
-    dictionary: Boolean(storedSections?.dictionary?.content),
+    main: Boolean(storedSectionsResolved.main.content),
+    advanced: Boolean(storedSectionsResolved.advanced.content),
+    dictionary: Boolean(storedSectionsResolved.dictionary.content),
   };
 
   const buildSections = (overrides?: {
@@ -411,30 +470,77 @@ export function PromptSettings() {
   };
 
   const saveAllSections = (sections: CleanupPromptSections) => {
-    if (activeProfileId === "default") {
-      updateCleanupPromptSections.mutate(sections, {
-        onSuccess: () => {
-          tauriAPI.emitSettingsChanged();
-        },
-      });
-      return;
-    }
-
-    const nextProfiles = uiProfiles.map((p) =>
-      p.id === activeProfileId ? { ...p, cleanup_prompt_sections: sections } : p
-    );
-    updateRewriteProgramPromptProfiles.mutate(nextProfiles, {
+    // Only used for Default scope. Per-profile prompt changes are stored as per-section overrides.
+    updateCleanupPromptSections.mutate(sections, {
       onSuccess: () => {
         tauriAPI.emitSettingsChanged();
       },
     });
   };
 
-  const saveProfileMetadata = (next: Partial<RewriteProgramPromptProfile>) => {
-    if (!activeProfile) return;
+  const normalizePromptOverrides = (
+    overrides: CleanupPromptSectionsOverride
+  ): CleanupPromptSectionsOverride | null => {
+    const hasAny =
+      overrides.main != null ||
+      overrides.advanced != null ||
+      overrides.dictionary != null;
+    return hasAny ? overrides : null;
+  };
 
-    const updated = uiProfiles.map((p) =>
-      p.id === activeProfile.id ? { ...p, ...next } : p
+  const saveProfileSectionOverride = (
+    key: SectionKey,
+    section: CleanupPromptSections[SectionKey] | null
+  ) => {
+    const current: CleanupPromptSectionsOverride =
+      profilePromptOverridesRef.current ?? {};
+    const next: CleanupPromptSectionsOverride = { ...current, [key]: section };
+    const normalized = normalizePromptOverrides(next);
+    profilePromptOverridesRef.current = normalized;
+
+    saveProfileMetadata({ cleanup_prompt_sections: normalized });
+  };
+
+  const buildSectionOverride = (
+    key: SectionKey,
+    overrides?: {
+      enabled?: boolean;
+      content?: string | null;
+    }
+  ): CleanupPromptSections[SectionKey] => {
+    if (localSections === null) {
+      return DEFAULT_SECTIONS[key];
+    }
+
+    const contentRaw =
+      overrides?.content !== undefined
+        ? overrides.content
+        : localSections[key].content;
+
+    const contentToStore =
+      contentRaw === defaultSections?.[key] ? null : contentRaw || null;
+
+    const enabledToStore =
+      overrides?.enabled !== undefined
+        ? overrides.enabled
+        : localSections[key].enabled;
+
+    return {
+      enabled: enabledToStore,
+      content: contentToStore,
+    };
+  };
+
+  const saveProfileMetadata = (next: Partial<RewriteProgramPromptProfile>) => {
+    if (activeProfileId === "default") return;
+
+    const exists = profiles.some((p) => p.id === activeProfileId);
+    if (!exists) {
+      return;
+    }
+
+    const updated = profiles.map((p) =>
+      p.id === activeProfileId ? { ...p, ...next } : p
     );
 
     updateRewriteProgramPromptProfiles.mutate(updated, {
@@ -444,167 +550,21 @@ export function PromptSettings() {
     });
   };
 
-  const addProfile = () => {
-    const baseSections = settings?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
-    const newProfile: RewriteProgramPromptProfile = {
-      id: createId(),
-      name: "New Profile",
-      program_paths: [],
-      cleanup_prompt_sections: JSON.parse(
-        JSON.stringify(baseSections)
-      ) as CleanupPromptSections,
-      stt_provider: settings?.stt_provider ?? null,
-      stt_model: settings?.stt_model ?? null,
-      stt_timeout_seconds: settings?.stt_timeout_seconds ?? DEFAULT_STT_TIMEOUT,
-      llm_provider: settings?.llm_provider ?? null,
-      llm_model: settings?.llm_model ?? null,
-      rewrite_llm_enabled: defaultRewriteEnabled,
-    };
-
-    // Optimistically show the new tab immediately.
-    setPendingNewProfile(newProfile);
-    setActiveProfileId(newProfile.id);
-    setLocalProfileName(newProfile.name);
-    setLocalProfilePaths([]);
-    setLocalProfileSttProvider(newProfile.stt_provider ?? null);
-    setLocalProfileSttModel(newProfile.stt_model ?? null);
-    setLocalProfileLlmProvider(newProfile.llm_provider ?? null);
-    setLocalProfileLlmModel(newProfile.llm_model ?? null);
-    setLocalProfileRewriteEnabled(defaultRewriteEnabled);
-    setLocalProfileSttTimeout(
-      newProfile.stt_timeout_seconds ?? DEFAULT_STT_TIMEOUT
-    );
-
-    const next = [...profiles, newProfile];
-    updateRewriteProgramPromptProfiles.mutate(next, {
-      onSuccess: () => {
-        tauriAPI.emitSettingsChanged();
-      },
-      onError: () => {
-        // If persisting fails, revert the optimistic tab.
-        setPendingNewProfile(null);
-        setActiveProfileId("default");
-      },
-    });
-  };
-
-  const updateProgramPathAtIndex = (idx: number, nextValue: string) => {
-    if (!activeProfile) return;
-
-    const next = [...localProfilePaths];
-    next[idx] = nextValue;
-    setLocalProfilePaths(next);
-  };
-
-  const persistProgramPaths = (paths: string[]) => {
-    if (!activeProfile) return;
-    saveProfileMetadata({ program_paths: paths });
-  };
-
-  const removeProgramPathAtIndex = (idx: number) => {
-    if (!activeProfile) return;
-    const next = localProfilePaths.filter((_, i) => i !== idx);
-    setLocalProfilePaths(next);
-    persistProgramPaths(next);
-  };
-
-  const addEmptyProgramPath = () => {
-    if (!activeProfile) return;
-    const next = [...localProfilePaths, ""];
-    setLocalProfilePaths(next);
-    // Don't persist until blur; avoids saving lots of empty strings.
-  };
-
-  const deleteActiveProfile = () => {
-    if (activeProfileId === "default") return;
-
-    // If the active profile is still optimistic (not yet in persisted settings), just cancel it.
-    if (
-      pendingNewProfile &&
-      activeProfileId === pendingNewProfile.id &&
-      !profiles.some((p) => p.id === pendingNewProfile.id)
-    ) {
-      setPendingNewProfile(null);
-      setActiveProfileId("default");
-      return;
-    }
-
-    const profile = profiles.find((p) => p.id === activeProfileId);
-    const name = profile?.name?.trim() || "this profile";
-
-    // Keep it simple: confirm before deleting.
-    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) {
-      return;
-    }
-
-    const next = profiles.filter((p) => p.id !== activeProfileId);
-    updateRewriteProgramPromptProfiles.mutate(next, {
-      onSuccess: () => {
-        tauriAPI.emitSettingsChanged();
-        setActiveProfileId("default");
-      },
-    });
-  };
-
-  const openWindowPicker = async () => {
-    setWindowPickerOpen(true);
-    setWindowPickerDropdownOpened(true);
-    setIsLoadingWindows(true);
-    try {
-      const windows = await tauriAPI.listOpenWindows();
-      setOpenWindows(windows);
-    } finally {
-      setIsLoadingWindows(false);
-    }
-  };
-
-  const addProgramPathFromPicker = (value: string) => {
-    if (!activeProfile) return;
-    const trimmed = value.trim();
-    if (!trimmed) return;
-
-    const existing = new Set(
-      localProfilePaths.map((p) => p.trim()).filter(Boolean)
-    );
-    if (existing.has(trimmed)) {
-      setWindowPickerOpen(false);
-      return;
-    }
-
-    // Prefer filling the first empty row rather than always appending.
-    const firstEmptyIndex = localProfilePaths.findIndex(
-      (p) => p.trim().length === 0
-    );
-
-    const nextLocal = [...localProfilePaths];
-    if (firstEmptyIndex >= 0) {
-      nextLocal[firstEmptyIndex] = trimmed;
-    } else {
-      nextLocal.push(trimmed);
-    }
-
-    // Persist a clean list (trim, remove empties, de-dupe while preserving order).
-    const deduped: string[] = [];
-    const seen = new Set<string>();
-    for (const p of nextLocal) {
-      const v = p.trim();
-      if (!v) continue;
-      if (seen.has(v)) continue;
-      seen.add(v);
-      deduped.push(v);
-    }
-
-    setLocalProfilePaths(deduped);
-    persistProgramPaths(deduped);
-    setWindowPickerOpen(false);
-  };
-
   const handleToggle = (key: SectionKey, checked: boolean) => {
     setLocalSections((prev) => {
       if (prev === null) return prev;
       return { ...prev, [key]: { ...prev[key], enabled: checked } };
     });
-    saveAllSections(buildSections({ key, enabled: checked }));
+
+    if (activeProfileId === "default") {
+      saveAllSections(buildSections({ key, enabled: checked }));
+      return;
+    }
+
+    saveProfileSectionOverride(
+      key,
+      buildSectionOverride(key, { enabled: checked })
+    );
   };
 
   const handleSave = (key: SectionKey, content: string) => {
@@ -612,7 +572,13 @@ export function PromptSettings() {
       if (prev === null) return prev;
       return { ...prev, [key]: { ...prev[key], content } };
     });
-    saveAllSections(buildSections({ key, content }));
+
+    if (activeProfileId === "default") {
+      saveAllSections(buildSections({ key, content }));
+      return;
+    }
+
+    saveProfileSectionOverride(key, buildSectionOverride(key, { content }));
   };
 
   const handleReset = (key: SectionKey) => {
@@ -621,7 +587,16 @@ export function PromptSettings() {
       if (prev === null) return prev;
       return { ...prev, [key]: { ...prev[key], content: defaultContent } };
     });
-    saveAllSections(buildSections({ key, content: null }));
+
+    if (activeProfileId === "default") {
+      saveAllSections(buildSections({ key, content: null }));
+      return;
+    }
+
+    saveProfileSectionOverride(
+      key,
+      buildSectionOverride(key, { content: null })
+    );
   };
 
   const handleDefaultSTTProviderChange = (value: string | null) => {
@@ -678,732 +653,730 @@ export function PromptSettings() {
     });
   };
 
+  if (isLoading) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          padding: "20px",
+        }}
+      >
+        <Loader size="sm" color="gray" />
+      </div>
+    );
+  }
+
+  // If user selected a profile that no longer exists, fall back to Default.
+  if (activeProfileId !== "default" && !activeProfile) {
+    return (
+      <div style={{ fontSize: 12, opacity: 0.75 }}>
+        That profile no longer exists. Select another profile in the Editing
+        dropdown.
+      </div>
+    );
+  }
+
+  const isDefaultScope = activeProfileId === "default";
+
   return (
     <>
-      <Tabs
-        value={activeProfileId}
-        onChange={(v) => setActiveProfileId(v ?? "default")}
-        keepMounted={false}
-      >
-        <Group justify="space-between" align="center" mb="md" wrap="nowrap">
-          <Tabs.List>
-            <Tabs.Tab value="default">Default</Tabs.Tab>
-            {uiProfiles.map((p) => (
-              <Tabs.Tab key={p.id} value={p.id}>
-                {p.name.trim() || "(Unnamed)"}
-              </Tabs.Tab>
-            ))}
-          </Tabs.List>
-
-          <Button
-            size="xs"
-            variant="light"
-            color="gray"
-            onClick={addProfile}
-            disabled={isLoading}
-          >
-            Add profile
-          </Button>
-        </Group>
-
-        <Tabs.Panel value="default">
-          {isLoading ? (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                padding: "20px",
-              }}
-            >
-              <Loader size="sm" color="gray" />
-            </div>
-          ) : (
-            <>
-              {/* Provider settings for Default (global baseline) */}
-              <Divider my="md" label="Speech-to-text" labelPosition="left" />
-              <div className="settings-row">
-                <div>
-                  <p className="settings-label">Speech-to-Text Provider</p>
-                  <p className="settings-description">
-                    Service for transcribing audio
-                  </p>
-                </div>
-                <Select
-                  data={sttProviderOptions}
-                  value={settings?.stt_provider ?? null}
-                  onChange={handleDefaultSTTProviderChange}
-                  placeholder="Select provider"
-                  withCheckIcon={false}
-                  disabled={
-                    sttCloudProviders.length === 0 &&
-                    sttLocalProviders.length === 0
-                  }
-                  styles={{
-                    input: {
-                      backgroundColor: "var(--bg-elevated)",
-                      borderColor: "var(--border-default)",
-                      color: "var(--text-primary)",
-                      minWidth: 200,
-                    },
-                  }}
-                />
-              </div>
-
-              {sttModelOptions.length > 0 && (
-                <div className="settings-row">
-                  <div>
-                    <p className="settings-label">STT Model</p>
-                    <p className="settings-description">
-                      Model to use for transcription
-                    </p>
-                  </div>
-                  <Select
-                    data={sttModelOptions}
-                    value={
-                      settings?.stt_model ?? sttModelOptions[0]?.value ?? null
-                    }
-                    onChange={handleDefaultSTTModelChange}
-                    placeholder="Select model"
-                    withCheckIcon={false}
-                    styles={{
-                      input: {
-                        backgroundColor: "var(--bg-elevated)",
-                        borderColor: "var(--border-default)",
-                        color: "var(--text-primary)",
-                        minWidth: 200,
-                      },
-                    }}
-                  />
-                </div>
-              )}
-
-              <div className="settings-row">
-                <div style={{ flex: 1 }}>
-                  <p className="settings-label">STT Timeout</p>
-                  <p className="settings-description">
-                    Increase if nothing is getting transcribed
-                  </p>
-                  <div
-                    style={{
-                      marginTop: 12,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                    }}
-                  >
-                    <Slider
-                      value={localProfileSttTimeout}
-                      onChange={setLocalProfileSttTimeout}
-                      onChangeEnd={(v) => {
-                        setLocalProfileSttTimeout(v);
-                        handleDefaultSTTTimeoutChange(v);
-                      }}
-                      min={0.5}
-                      max={3.0}
-                      step={0.1}
-                      marks={[
-                        { value: 0.5, label: "0.5s" },
-                        { value: 3.0, label: "3.0s" },
-                      ]}
-                      styles={{
-                        root: { flex: 1 },
-                        track: { backgroundColor: "var(--bg-elevated)" },
-                        bar: { backgroundColor: "var(--accent-primary)" },
-                        thumb: { borderColor: "var(--accent-primary)" },
-                        markLabel: {
-                          color: "var(--text-secondary)",
-                          fontSize: 10,
-                        },
-                      }}
-                    />
-                    <Text size="xs" c="dimmed" style={{ minWidth: 32 }}>
-                      {localProfileSttTimeout.toFixed(1)}s
-                    </Text>
-                  </div>
-                </div>
-              </div>
-
-              <Divider my="md" label="Language model" labelPosition="left" />
-
-              <div className="settings-row">
-                <div>
-                  <p className="settings-label">Rewrite Transcription</p>
-                  <p className="settings-description">
-                    Enable or disable rewriting the transcription with an LLM
-                  </p>
-                </div>
-                <Switch
-                  checked={defaultRewriteEnabled}
-                  onChange={(e) => {
-                    const enabled = e.currentTarget.checked;
-                    updateRewriteLlmEnabled.mutate(enabled, {
-                      onSuccess: () => {
-                        tauriAPI.emitSettingsChanged();
-                      },
-                    });
-                  }}
-                  color="gray"
-                  size="md"
-                />
-              </div>
-
-              <div className="settings-row">
-                <div>
-                  <p className="settings-label">Language Model Provider</p>
-                  <p className="settings-description">
-                    AI service for text formatting
-                  </p>
-                </div>
-                <Select
-                  data={llmProviderOptions}
-                  value={settings?.llm_provider ?? null}
-                  onChange={handleDefaultLLMProviderChange}
-                  placeholder="Select provider"
-                  withCheckIcon={false}
-                  disabled={
-                    llmCloudProviders.length === 0 &&
-                    llmLocalProviders.length === 0
-                  }
-                  styles={{
-                    input: {
-                      backgroundColor: "var(--bg-elevated)",
-                      borderColor: "var(--border-default)",
-                      color: "var(--text-primary)",
-                      minWidth: 200,
-                    },
-                  }}
-                />
-              </div>
-
-              {llmModelOptions.length > 0 && (
-                <div className="settings-row">
-                  <div>
-                    <p className="settings-label">Rewrite LLM Model</p>
-                    <p className="settings-description">
-                      LLM Model used to rewrite the transcription.
-                    </p>
-                  </div>
-                  <Select
-                    data={llmModelOptions}
-                    value={
-                      settings?.llm_model ?? llmModelOptions[0]?.value ?? null
-                    }
-                    onChange={handleDefaultLLMModelChange}
-                    placeholder="Select model"
-                    withCheckIcon={false}
-                    styles={{
-                      input: {
-                        backgroundColor: "var(--bg-elevated)",
-                        borderColor: "var(--border-default)",
-                        color: "var(--text-primary)",
-                        minWidth: 200,
-                      },
-                    }}
-                  />
-                </div>
-              )}
-
-              <div style={{ marginTop: 16 }}>
-                <Accordion variant="separated" radius="md">
-                  <PromptSectionEditor
-                    sectionKey={`${activeProfileId}-main-prompt`}
-                    title="Core Formatting Rules"
-                    description="Filler word removal, punctuation, capitalization"
-                    enabled={true}
-                    hideToggle={true}
-                    initialContent={localSections!.main.content}
-                    defaultContent={defaultSections?.main ?? ""}
-                    hasCustom={hasCustomContent.main}
-                    onToggle={() => {}}
-                    onSave={(content) => handleSave("main", content)}
-                    onReset={() => handleReset("main")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-
-                  <PromptSectionEditor
-                    sectionKey={`${activeProfileId}-advanced-prompt`}
-                    title="Advanced Features"
-                    description='Backtrack corrections ("scratch that") and list formatting'
-                    enabled={localSections!.advanced.enabled}
-                    initialContent={localSections!.advanced.content}
-                    defaultContent={defaultSections?.advanced ?? ""}
-                    hasCustom={hasCustomContent.advanced}
-                    onToggle={(checked) => handleToggle("advanced", checked)}
-                    onSave={(content) => handleSave("advanced", content)}
-                    onReset={() => handleReset("advanced")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-
-                  <PromptSectionEditor
-                    sectionKey={`${activeProfileId}-dictionary-prompt`}
-                    title="Personal Dictionary"
-                    description="Custom word mappings for technical terms"
-                    enabled={localSections!.dictionary.enabled}
-                    initialContent={localSections!.dictionary.content}
-                    defaultContent={defaultSections?.dictionary ?? ""}
-                    hasCustom={hasCustomContent.dictionary}
-                    onToggle={(checked) => handleToggle("dictionary", checked)}
-                    onSave={(content) => handleSave("dictionary", content)}
-                    onReset={() => handleReset("dictionary")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-                </Accordion>
-              </div>
-            </>
-          )}
-        </Tabs.Panel>
-
-        {uiProfiles.map((p) => (
-          <Tabs.Panel key={p.id} value={p.id}>
-            <div style={{ marginBottom: 16 }}>
-              <TextInput
-                label="Name"
-                placeholder="e.g. VS Code"
-                value={localProfileName}
-                onChange={(e) => setLocalProfileName(e.currentTarget.value)}
-                onBlur={() => {
-                  if (!activeProfile) return;
-                  if (localProfileName !== activeProfile.name) {
-                    saveProfileMetadata({ name: localProfileName });
-                  }
-                }}
-                styles={{ label: { fontSize: 12 } }}
-              />
-
-              <Group justify="space-between" align="center" mt="sm" mb={6}>
-                <div style={{ fontSize: 12, fontWeight: 500 }}>Programs</div>
-                <Group gap={8}>
-                  <Tooltip
-                    label="Pick from currently open apps"
-                    withArrow
-                    position="bottom"
-                  >
-                    <ActionIcon
-                      variant="subtle"
-                      color="gray"
-                      onClick={openWindowPicker}
-                      aria-label="Pick from open programs"
-                    >
-                      <Crosshair size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-
-                  <Tooltip
-                    label="Add a program path"
-                    withArrow
-                    position="bottom"
-                  >
-                    <ActionIcon
-                      variant="light"
-                      color="gray"
-                      onClick={addEmptyProgramPath}
-                      aria-label="Add program"
-                      disabled={
-                        isLoading ||
-                        updateRewriteProgramPromptProfiles.isPending
-                      }
-                    >
-                      <Plus size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-              </Group>
-
-              {localProfilePaths.length === 0 ? (
-                <div style={{ fontSize: 12, opacity: 0.7, paddingBottom: 8 }}>
-                  No programs yet. Add one to apply this profile automatically.
-                </div>
-              ) : null}
-
-              {localProfilePaths.map((path, idx) => (
-                <Group key={`${p.id}-path-${idx}`} mt={6} wrap="nowrap">
-                  <TextInput
-                    placeholder="C:\\Program Files\\...\\app.exe"
-                    value={path}
-                    onChange={(e) =>
-                      updateProgramPathAtIndex(idx, e.currentTarget.value)
-                    }
-                    onBlur={() => {
-                      const trimmed = localProfilePaths.map((p) => p.trim());
-                      const filtered = trimmed.filter((p) => p.length > 0);
-
-                      // If we removed empties or changed values, persist.
-                      // Also de-dupe while preserving order.
-                      const deduped: string[] = [];
-                      const seen = new Set<string>();
-                      for (const p of filtered) {
-                        if (!seen.has(p)) {
-                          seen.add(p);
-                          deduped.push(p);
-                        }
-                      }
-
-                      setLocalProfilePaths(deduped);
-                      if (!activeProfile) return;
-                      if (
-                        JSON.stringify(deduped) !==
-                        JSON.stringify(activeProfile.program_paths ?? [])
-                      ) {
-                        persistProgramPaths(deduped);
-                      }
-                    }}
-                    styles={{ input: { fontSize: 12 } }}
-                    style={{ flex: 1 }}
-                  />
-                  <ActionIcon
-                    variant="subtle"
-                    color="red"
-                    aria-label="Remove program"
-                    onClick={() => removeProgramPathAtIndex(idx)}
-                  >
-                    <Trash2 size={16} />
-                  </ActionIcon>
-                </Group>
-              ))}
-            </div>
-
-            <Divider my="md" label="Speech-to-text" labelPosition="left" />
-
-            <div className="settings-row">
-              <div>
-                <p className="settings-label">Speech-to-Text Provider</p>
-                <p className="settings-description">
-                  Service for transcribing audio
-                </p>
-              </div>
-              <Select
-                data={sttProviderOptions}
-                value={localProfileSttProvider}
-                onChange={(value) => {
-                  if (!value) return;
-                  setLocalProfileSttProvider(value);
-                  const models = STT_MODELS[value] ?? [];
-                  const firstModel = models[0]?.value ?? null;
-                  setLocalProfileSttModel(firstModel);
-                  saveProfileMetadata({
-                    stt_provider: value,
-                    stt_model: firstModel,
-                  });
-                }}
-                placeholder="Select provider"
-                withCheckIcon={false}
-                disabled={
-                  isLoading ||
-                  (sttCloudProviders.length === 0 &&
-                    sttLocalProviders.length === 0)
-                }
-                styles={{
-                  input: {
-                    backgroundColor: "var(--bg-elevated)",
-                    borderColor: "var(--border-default)",
-                    color: "var(--text-primary)",
-                    minWidth: 200,
-                  },
-                }}
-              />
-            </div>
-
-            {(localProfileSttProvider
-              ? STT_MODELS[localProfileSttProvider] ?? []
-              : []
-            ).length > 0 && (
-              <div className="settings-row">
-                <div>
-                  <p className="settings-label">STT Model</p>
-                  <p className="settings-description">
-                    Model to use for transcription
-                  </p>
-                </div>
-                <Select
-                  data={STT_MODELS[localProfileSttProvider ?? ""] ?? []}
-                  value={localProfileSttModel}
-                  onChange={(value) => {
-                    if (!value) return;
-                    setLocalProfileSttModel(value);
-                    saveProfileMetadata({ stt_model: value });
-                  }}
-                  placeholder="Select model"
-                  withCheckIcon={false}
-                  disabled={isLoading}
-                  styles={{
-                    input: {
-                      backgroundColor: "var(--bg-elevated)",
-                      borderColor: "var(--border-default)",
-                      color: "var(--text-primary)",
-                      minWidth: 200,
-                    },
-                  }}
-                />
-              </div>
-            )}
-
-            <div className="settings-row">
-              <div style={{ flex: 1 }}>
-                <p className="settings-label">STT Timeout</p>
-                <p className="settings-description">
-                  Increase if nothing is getting transcribed
-                </p>
-                <div
-                  style={{
-                    marginTop: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 12,
-                  }}
-                >
-                  <Slider
-                    value={localProfileSttTimeout}
-                    onChange={setLocalProfileSttTimeout}
-                    onChangeEnd={(v) => {
-                      setLocalProfileSttTimeout(v);
-                      saveProfileMetadata({ stt_timeout_seconds: v });
-                    }}
-                    min={0.5}
-                    max={3.0}
-                    step={0.1}
-                    marks={[
-                      { value: 0.5, label: "0.5s" },
-                      { value: 3.0, label: "3.0s" },
-                    ]}
-                    styles={{
-                      root: { flex: 1 },
-                      track: { backgroundColor: "var(--bg-elevated)" },
-                      bar: { backgroundColor: "var(--accent-primary)" },
-                      thumb: { borderColor: "var(--accent-primary)" },
-                      markLabel: {
-                        color: "var(--text-secondary)",
-                        fontSize: 10,
-                      },
-                    }}
-                  />
-                  <Text size="xs" c="dimmed" style={{ minWidth: 32 }}>
-                    {localProfileSttTimeout.toFixed(1)}s
-                  </Text>
-                </div>
-              </div>
-            </div>
-
-            <Divider my="md" label="Language model" labelPosition="left" />
-
-            <div className="settings-row">
-              <div>
-                <p className="settings-label">Rewrite Transcription</p>
-                <p className="settings-description">
-                  Enable or disable rewriting the transcription with an LLM
-                </p>
-              </div>
-              <Switch
-                checked={localProfileRewriteEnabled}
-                onChange={(e) => {
-                  const enabled = e.currentTarget.checked;
-                  setLocalProfileRewriteEnabled(enabled);
-                  saveProfileMetadata({ rewrite_llm_enabled: enabled });
-                }}
-                color="gray"
-                size="md"
-                disabled={isLoading}
-              />
-            </div>
-
-            <div className="settings-row">
-              <div>
-                <p className="settings-label">Language Model Provider</p>
-                <p className="settings-description">
-                  AI service for text formatting
-                </p>
-              </div>
-              <Select
-                data={llmProviderOptions}
-                value={localProfileLlmProvider}
-                onChange={(value) => {
-                  if (!value) return;
-                  setLocalProfileLlmProvider(value);
-                  const models = LLM_MODELS[value] ?? [];
-                  const firstModel = models[0]?.value ?? null;
-                  setLocalProfileLlmModel(firstModel);
-                  saveProfileMetadata({
-                    llm_provider: value,
-                    llm_model: firstModel,
-                  });
-                }}
-                placeholder="Select provider"
-                withCheckIcon={false}
-                disabled={
-                  isLoading ||
-                  (llmCloudProviders.length === 0 &&
-                    llmLocalProviders.length === 0)
-                }
-                styles={{
-                  input: {
-                    backgroundColor: "var(--bg-elevated)",
-                    borderColor: "var(--border-default)",
-                    color: "var(--text-primary)",
-                    minWidth: 200,
-                  },
-                }}
-              />
-            </div>
-
-            {(localProfileLlmProvider
-              ? LLM_MODELS[localProfileLlmProvider] ?? []
-              : []
-            ).length > 0 && (
-              <div className="settings-row">
-                <div>
-                  <p className="settings-label">Rewrite LLM Model</p>
-                  <p className="settings-description">
-                    LLM Model used to rewrite the transcription.
-                  </p>
-                </div>
-                <Select
-                  data={LLM_MODELS[localProfileLlmProvider ?? ""] ?? []}
-                  value={localProfileLlmModel}
-                  onChange={(value) => {
-                    if (!value) return;
-                    setLocalProfileLlmModel(value);
-                    saveProfileMetadata({ llm_model: value });
-                  }}
-                  placeholder="Select model"
-                  withCheckIcon={false}
-                  disabled={isLoading}
-                  styles={{
-                    input: {
-                      backgroundColor: "var(--bg-elevated)",
-                      borderColor: "var(--border-default)",
-                      color: "var(--text-primary)",
-                      minWidth: 200,
-                    },
-                  }}
-                />
-              </div>
-            )}
-
-            {isLoading ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  padding: "20px",
-                }}
-              >
-                <Loader size="sm" color="gray" />
-              </div>
-            ) : (
-              <div style={{ marginTop: 16 }}>
-                <Accordion variant="separated" radius="md">
-                  <PromptSectionEditor
-                    sectionKey={`${p.id}-main-prompt`}
-                    title="Core Formatting Rules"
-                    description="Filler word removal, punctuation, capitalization"
-                    enabled={true}
-                    hideToggle={true}
-                    initialContent={localSections!.main.content}
-                    defaultContent={defaultSections?.main ?? ""}
-                    hasCustom={hasCustomContent.main}
-                    onToggle={() => {}}
-                    onSave={(content) => handleSave("main", content)}
-                    onReset={() => handleReset("main")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-
-                  <PromptSectionEditor
-                    sectionKey={`${p.id}-advanced-prompt`}
-                    title="Advanced Features"
-                    description='Backtrack corrections ("scratch that") and list formatting'
-                    enabled={localSections!.advanced.enabled}
-                    initialContent={localSections!.advanced.content}
-                    defaultContent={defaultSections?.advanced ?? ""}
-                    hasCustom={hasCustomContent.advanced}
-                    onToggle={(checked) => handleToggle("advanced", checked)}
-                    onSave={(content) => handleSave("advanced", content)}
-                    onReset={() => handleReset("advanced")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-
-                  <PromptSectionEditor
-                    sectionKey={`${p.id}-dictionary-prompt`}
-                    title="Personal Dictionary"
-                    description="Custom word mappings for technical terms"
-                    enabled={localSections!.dictionary.enabled}
-                    initialContent={localSections!.dictionary.content}
-                    defaultContent={defaultSections?.dictionary ?? ""}
-                    hasCustom={hasCustomContent.dictionary}
-                    onToggle={(checked) => handleToggle("dictionary", checked)}
-                    onSave={(content) => handleSave("dictionary", content)}
-                    onReset={() => handleReset("dictionary")}
-                    isSaving={
-                      updateCleanupPromptSections.isPending ||
-                      updateRewriteProgramPromptProfiles.isPending
-                    }
-                  />
-                </Accordion>
-              </div>
-            )}
-
-            <Group justify="flex-end" mt="md">
-              <Button
-                size="xs"
-                variant="light"
-                color="red"
-                leftSection={<Trash2 size={14} />}
-                onClick={deleteActiveProfile}
-                disabled={
-                  isLoading ||
-                  updateRewriteProgramPromptProfiles.isPending ||
-                  activeProfileId === "default"
-                }
-              >
-                Delete profile
-              </Button>
-            </Group>
-          </Tabs.Panel>
-        ))}
-      </Tabs>
-
       <Modal
-        opened={windowPickerOpen}
-        onClose={() => {
-          setWindowPickerOpen(false);
-          setWindowPickerDropdownOpened(false);
-        }}
-        title="Pick an open program"
+        opened={resetDialog !== null}
+        onClose={() => setResetDialog(null)}
+        title={resetDialog?.title ?? ""}
         centered
       >
-        {isLoadingWindows ? (
-          <Group justify="center" p="md">
-            <Loader size="sm" color="gray" />
-          </Group>
-        ) : (
+        <Text size="sm" c="dimmed" style={{ lineHeight: 1.4 }}>
+          This setting is currently overriding the Default profile. Disable the
+          override to inherit from Default.
+        </Text>
+        <Group justify="flex-end" mt="md" gap="sm">
+          <Button variant="default" onClick={() => setResetDialog(null)}>
+            Keep override
+          </Button>
+          <Button
+            color="gray"
+            onClick={() => {
+              const confirm = resetDialog?.onConfirm;
+              setResetDialog(null);
+              confirm?.();
+            }}
+          >
+            Disable override
+          </Button>
+        </Group>
+      </Modal>
+
+      <Divider my="md" label="Speech-to-text" labelPosition="left" />
+
+      <div className="settings-row">
+        <div>
+          <p className="settings-label">Speech-to-Text Provider</p>
+          <p className="settings-description">Service for transcribing audio</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {!isDefaultScope && sttProviderInheriting && (
+            <Tooltip label={INHERIT_TOOLTIP} withArrow>
+              <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+            </Tooltip>
+          )}
+          {!isDefaultScope && !sttProviderInheriting && (
+            <Tooltip label="Disable override (inherit from Default)" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() =>
+                  openDisableOverrideDialog({
+                    title: "Disable Speech-to-Text Provider override?",
+                    onConfirm: () => {
+                      setSttProviderInheriting(true);
+                      setSttModelInheriting(true);
+                      setLocalProfileSttProvider(
+                        settings?.stt_provider ?? null
+                      );
+                      setLocalProfileSttModel(settings?.stt_model ?? null);
+                      saveProfileMetadata({
+                        stt_provider: null,
+                        stt_model: null,
+                      });
+                    },
+                  })
+                }
+              >
+                <RotateCcw size={14} style={{ opacity: 0.65 }} />
+              </ActionIcon>
+            </Tooltip>
+          )}
           <Select
-            searchable
-            nothingFoundMessage="No windows found"
-            placeholder="Select a window"
-            data={windowPickerOptions}
-            dropdownOpened={windowPickerDropdownOpened}
-            onDropdownOpen={() => setWindowPickerDropdownOpened(true)}
-            onDropdownClose={() => setWindowPickerDropdownOpened(false)}
+            data={sttProviderOptions}
+            value={
+              isDefaultScope
+                ? settings?.stt_provider ?? null
+                : localProfileSttProvider
+            }
             onChange={(value) => {
               if (!value) return;
-              addProgramPathFromPicker(value);
+              if (isDefaultScope) {
+                handleDefaultSTTProviderChange(value);
+                return;
+              }
+
+              setSttProviderInheriting(false);
+              setSttModelInheriting(false);
+              setLocalProfileSttProvider(value);
+              const models = STT_MODELS[value] ?? [];
+              const firstModel = models[0]?.value ?? null;
+              setLocalProfileSttModel(firstModel);
+              saveProfileMetadata({
+                stt_provider: value,
+                stt_model: firstModel,
+              });
+            }}
+            placeholder="Select provider"
+            withCheckIcon={false}
+            disabled={
+              sttCloudProviders.length === 0 && sttLocalProviders.length === 0
+            }
+            styles={{
+              input: {
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--border-default)",
+                color: "var(--text-primary)",
+                minWidth: 200,
+              },
             }}
           />
-        )}
-      </Modal>
+        </div>
+      </div>
+
+      {sttModelOptions.length > 0 ? (
+        <div className="settings-row">
+          <div>
+            <p className="settings-label">STT Model</p>
+            <p className="settings-description">
+              Model to use for transcription
+            </p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {!isDefaultScope && sttModelInheriting && (
+              <Tooltip label={INHERIT_TOOLTIP} withArrow>
+                <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+              </Tooltip>
+            )}
+            {!isDefaultScope && !sttModelInheriting && (
+              <Tooltip
+                label="Disable override (inherit from Default)"
+                withArrow
+              >
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="sm"
+                  onClick={() =>
+                    openDisableOverrideDialog({
+                      title: "Disable STT Model override?",
+                      onConfirm: () => {
+                        setSttModelInheriting(true);
+                        setLocalProfileSttModel(settings?.stt_model ?? null);
+                        saveProfileMetadata({ stt_model: null });
+                      },
+                    })
+                  }
+                >
+                  <RotateCcw size={14} style={{ opacity: 0.65 }} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            <Select
+              data={sttModelOptions}
+              value={
+                isDefaultScope
+                  ? settings?.stt_model ?? sttModelOptions[0]?.value ?? null
+                  : localProfileSttModel
+              }
+              onChange={(value) => {
+                if (!value) return;
+                if (isDefaultScope) {
+                  handleDefaultSTTModelChange(value);
+                  return;
+                }
+                setSttModelInheriting(false);
+                setLocalProfileSttModel(value);
+                saveProfileMetadata({ stt_model: value });
+              }}
+              placeholder="Select model"
+              withCheckIcon={false}
+              styles={{
+                input: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-primary)",
+                  minWidth: 200,
+                },
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="settings-row no-divider">
+        <div>
+          <p className="settings-label">STT Timeout</p>
+          <p className="settings-description">
+            Increase if nothing is getting transcribed
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {!isDefaultScope && sttTimeoutInheriting && (
+            <Tooltip label={INHERIT_TOOLTIP} withArrow>
+              <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+            </Tooltip>
+          )}
+          {!isDefaultScope && !sttTimeoutInheriting && (
+            <Tooltip label="Disable override (inherit from Default)" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() =>
+                  openDisableOverrideDialog({
+                    title: "Disable STT Timeout override?",
+                    onConfirm: () => {
+                      setSttTimeoutInheriting(true);
+                      setLocalProfileSttTimeout(
+                        settings?.stt_timeout_seconds ?? DEFAULT_STT_TIMEOUT
+                      );
+                      saveProfileMetadata({ stt_timeout_seconds: null });
+                    },
+                  })
+                }
+              >
+                <RotateCcw size={14} style={{ opacity: 0.65 }} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+
+          <NumberInput
+            value={localProfileSttTimeout}
+            onChange={(value) => {
+              setLocalProfileSttTimeout(value);
+
+              if (typeof value !== "number" || Number.isNaN(value)) {
+                return;
+              }
+
+              const clamped = Math.max(0.5, Math.min(3.0, value));
+              if (clamped !== value) {
+                setLocalProfileSttTimeout(clamped);
+              }
+
+              if (isDefaultScope) {
+                handleDefaultSTTTimeoutChange(clamped);
+                return;
+              }
+
+              setSttTimeoutInheriting(false);
+              saveProfileMetadata({ stt_timeout_seconds: clamped });
+            }}
+            min={0.5}
+            max={3.0}
+            step={0.1}
+            clampBehavior="strict"
+            styles={{
+              input: {
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--border-default)",
+                color: "var(--text-primary)",
+                width: 120,
+              },
+            }}
+            rightSection={
+              <Text size="xs" c="dimmed">
+                s
+              </Text>
+            }
+            rightSectionPointerEvents="none"
+          />
+        </div>
+      </div>
+
+      <Divider my="md" label="Language model" labelPosition="left" />
+
+      <div className="settings-row">
+        <div>
+          <p className="settings-label">Rewrite Transcription</p>
+          <p className="settings-description">
+            Enable or disable rewriting the transcription with an LLM
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {!isDefaultScope && rewriteEnabledInheriting && (
+            <Tooltip label={INHERIT_TOOLTIP} withArrow>
+              <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+            </Tooltip>
+          )}
+          {!isDefaultScope && !rewriteEnabledInheriting && (
+            <Tooltip label="Disable override (inherit from Default)" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() =>
+                  openDisableOverrideDialog({
+                    title: "Disable Rewrite Transcription override?",
+                    onConfirm: () => {
+                      setRewriteEnabledInheriting(true);
+                      setLocalProfileRewriteEnabled(defaultRewriteEnabled);
+                      saveProfileMetadata({ rewrite_llm_enabled: null });
+                    },
+                  })
+                }
+              >
+                <RotateCcw size={14} style={{ opacity: 0.65 }} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          <Switch
+            checked={
+              isDefaultScope
+                ? defaultRewriteEnabled
+                : localProfileRewriteEnabled
+            }
+            onChange={(e) => {
+              const enabled = e.currentTarget.checked;
+              if (isDefaultScope) {
+                updateRewriteLlmEnabled.mutate(enabled, {
+                  onSuccess: () => {
+                    tauriAPI.emitSettingsChanged();
+                  },
+                });
+                return;
+              }
+
+              setRewriteEnabledInheriting(false);
+              setLocalProfileRewriteEnabled(enabled);
+              saveProfileMetadata({ rewrite_llm_enabled: enabled });
+            }}
+            color="gray"
+            size="md"
+          />
+        </div>
+      </div>
+
+      <div className="settings-row">
+        <div>
+          <p className="settings-label">Language Model Provider</p>
+          <p className="settings-description">AI service for text formatting</p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {!isDefaultScope && llmProviderInheriting && (
+            <Tooltip label={INHERIT_TOOLTIP} withArrow>
+              <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+            </Tooltip>
+          )}
+          {!isDefaultScope && !llmProviderInheriting && (
+            <Tooltip label="Disable override (inherit from Default)" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() =>
+                  openDisableOverrideDialog({
+                    title: "Disable Language Model Provider override?",
+                    onConfirm: () => {
+                      setLlmProviderInheriting(true);
+                      setLlmModelInheriting(true);
+                      setLocalProfileLlmProvider(
+                        settings?.llm_provider ?? null
+                      );
+                      setLocalProfileLlmModel(settings?.llm_model ?? null);
+                      saveProfileMetadata({
+                        llm_provider: null,
+                        llm_model: null,
+                      });
+                    },
+                  })
+                }
+              >
+                <RotateCcw size={14} style={{ opacity: 0.65 }} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          <Select
+            data={llmProviderOptions}
+            value={
+              isDefaultScope
+                ? settings?.llm_provider ?? null
+                : localProfileLlmProvider
+            }
+            onChange={(value) => {
+              if (!value) return;
+              if (isDefaultScope) {
+                handleDefaultLLMProviderChange(value);
+                return;
+              }
+
+              setLlmProviderInheriting(false);
+              setLlmModelInheriting(false);
+              setLocalProfileLlmProvider(value);
+              const models = LLM_MODELS[value] ?? [];
+              const firstModel = models[0]?.value ?? null;
+              setLocalProfileLlmModel(firstModel);
+              saveProfileMetadata({
+                llm_provider: value,
+                llm_model: firstModel,
+              });
+            }}
+            placeholder="Select provider"
+            withCheckIcon={false}
+            disabled={
+              llmCloudProviders.length === 0 && llmLocalProviders.length === 0
+            }
+            styles={{
+              input: {
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--border-default)",
+                color: "var(--text-primary)",
+                minWidth: 200,
+              },
+            }}
+          />
+        </div>
+      </div>
+
+      {llmModelOptions.length > 0 ? (
+        <div className="settings-row">
+          <div>
+            <p className="settings-label">Rewrite LLM Model</p>
+            <p className="settings-description">
+              LLM Model used to rewrite the transcription.
+            </p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {!isDefaultScope && llmModelInheriting && (
+              <Tooltip label={INHERIT_TOOLTIP} withArrow>
+                <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+              </Tooltip>
+            )}
+            {!isDefaultScope && !llmModelInheriting && (
+              <Tooltip
+                label="Disable override (inherit from Default)"
+                withArrow
+              >
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="sm"
+                  onClick={() =>
+                    openDisableOverrideDialog({
+                      title: "Disable Rewrite LLM Model override?",
+                      onConfirm: () => {
+                        setLlmModelInheriting(true);
+                        setLocalProfileLlmModel(settings?.llm_model ?? null);
+                        saveProfileMetadata({ llm_model: null });
+                      },
+                    })
+                  }
+                >
+                  <RotateCcw size={14} style={{ opacity: 0.65 }} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            <Select
+              data={llmModelOptions}
+              value={
+                isDefaultScope
+                  ? settings?.llm_model ?? llmModelOptions[0]?.value ?? null
+                  : localProfileLlmModel
+              }
+              onChange={(value) => {
+                if (!value) return;
+                if (isDefaultScope) {
+                  handleDefaultLLMModelChange(value);
+                  return;
+                }
+
+                setLlmModelInheriting(false);
+                setLocalProfileLlmModel(value);
+                saveProfileMetadata({ llm_model: value });
+              }}
+              placeholder="Select model"
+              withCheckIcon={false}
+              styles={{
+                input: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-primary)",
+                  minWidth: 200,
+                },
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      <div style={{ marginTop: 16 }}>
+        <Accordion variant="separated" radius="md">
+          <PromptSectionEditor
+            sectionKey={`${activeProfileId}-main-prompt`}
+            title="Core Formatting Rules"
+            description="Filler word removal, punctuation, capitalization"
+            enabled={true}
+            hideToggle={true}
+            initialContent={localSections!.main.content}
+            defaultContent={defaultSections?.main ?? ""}
+            hasCustom={hasCustomContent.main}
+            inheritMode={
+              isDefaultScope
+                ? null
+                : activeProfile?.cleanup_prompt_sections?.main == null
+                ? "inheriting"
+                : "overriding"
+            }
+            onDisableOverride={
+              isDefaultScope
+                ? undefined
+                : () =>
+                    openDisableOverrideDialog({
+                      title: "Disable Core Formatting Rules override?",
+                      onConfirm: () => {
+                        const base =
+                          settings?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
+
+                        const current: CleanupPromptSectionsOverride =
+                          activeProfile?.cleanup_prompt_sections ?? {};
+                        const next = normalizePromptOverrides({
+                          ...current,
+                          main: null,
+                        });
+                        profilePromptOverridesRef.current = next;
+
+                        const resolved: CleanupPromptSections = {
+                          main: next?.main ?? base.main,
+                          advanced: next?.advanced ?? base.advanced,
+                          dictionary: next?.dictionary ?? base.dictionary,
+                        };
+
+                        setLocalSections({
+                          main: {
+                            enabled: resolved.main.enabled,
+                            content:
+                              resolved.main.content ?? defaultSections!.main,
+                          },
+                          advanced: {
+                            enabled: resolved.advanced.enabled,
+                            content:
+                              resolved.advanced.content ??
+                              defaultSections!.advanced,
+                          },
+                          dictionary: {
+                            enabled: resolved.dictionary.enabled,
+                            content:
+                              resolved.dictionary.content ??
+                              defaultSections!.dictionary,
+                          },
+                        });
+
+                        saveProfileMetadata({ cleanup_prompt_sections: next });
+                      },
+                    })
+            }
+            onToggle={() => {}}
+            onSave={(content) => handleSave("main", content)}
+            onReset={() => handleReset("main")}
+            isSaving={
+              updateCleanupPromptSections.isPending ||
+              updateRewriteProgramPromptProfiles.isPending
+            }
+          />
+
+          <PromptSectionEditor
+            sectionKey={`${activeProfileId}-advanced-prompt`}
+            title="Advanced Features"
+            description='Backtrack corrections ("scratch that") and list formatting'
+            enabled={localSections!.advanced.enabled}
+            initialContent={localSections!.advanced.content}
+            defaultContent={defaultSections?.advanced ?? ""}
+            hasCustom={hasCustomContent.advanced}
+            inheritMode={
+              isDefaultScope
+                ? null
+                : activeProfile?.cleanup_prompt_sections?.advanced == null
+                ? "inheriting"
+                : "overriding"
+            }
+            onDisableOverride={
+              isDefaultScope
+                ? undefined
+                : () =>
+                    openDisableOverrideDialog({
+                      title: "Disable Advanced Features override?",
+                      onConfirm: () => {
+                        const base =
+                          settings?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
+
+                        const current: CleanupPromptSectionsOverride =
+                          activeProfile?.cleanup_prompt_sections ?? {};
+                        const next = normalizePromptOverrides({
+                          ...current,
+                          advanced: null,
+                        });
+                        profilePromptOverridesRef.current = next;
+
+                        const resolved: CleanupPromptSections = {
+                          main: next?.main ?? base.main,
+                          advanced: next?.advanced ?? base.advanced,
+                          dictionary: next?.dictionary ?? base.dictionary,
+                        };
+
+                        setLocalSections({
+                          main: {
+                            enabled: resolved.main.enabled,
+                            content:
+                              resolved.main.content ?? defaultSections!.main,
+                          },
+                          advanced: {
+                            enabled: resolved.advanced.enabled,
+                            content:
+                              resolved.advanced.content ??
+                              defaultSections!.advanced,
+                          },
+                          dictionary: {
+                            enabled: resolved.dictionary.enabled,
+                            content:
+                              resolved.dictionary.content ??
+                              defaultSections!.dictionary,
+                          },
+                        });
+
+                        saveProfileMetadata({ cleanup_prompt_sections: next });
+                      },
+                    })
+            }
+            onToggle={(checked) => handleToggle("advanced", checked)}
+            onSave={(content) => handleSave("advanced", content)}
+            onReset={() => handleReset("advanced")}
+            isSaving={
+              updateCleanupPromptSections.isPending ||
+              updateRewriteProgramPromptProfiles.isPending
+            }
+          />
+
+          <PromptSectionEditor
+            sectionKey={`${activeProfileId}-dictionary-prompt`}
+            title="Personal Dictionary"
+            description="Custom word mappings for technical terms"
+            enabled={localSections!.dictionary.enabled}
+            initialContent={localSections!.dictionary.content}
+            defaultContent={defaultSections?.dictionary ?? ""}
+            hasCustom={hasCustomContent.dictionary}
+            inheritMode={
+              isDefaultScope
+                ? null
+                : activeProfile?.cleanup_prompt_sections?.dictionary == null
+                ? "inheriting"
+                : "overriding"
+            }
+            onDisableOverride={
+              isDefaultScope
+                ? undefined
+                : () =>
+                    openDisableOverrideDialog({
+                      title: "Disable Personal Dictionary override?",
+                      onConfirm: () => {
+                        const base =
+                          settings?.cleanup_prompt_sections ?? DEFAULT_SECTIONS;
+
+                        const current: CleanupPromptSectionsOverride =
+                          activeProfile?.cleanup_prompt_sections ?? {};
+                        const next = normalizePromptOverrides({
+                          ...current,
+                          dictionary: null,
+                        });
+                        profilePromptOverridesRef.current = next;
+
+                        const resolved: CleanupPromptSections = {
+                          main: next?.main ?? base.main,
+                          advanced: next?.advanced ?? base.advanced,
+                          dictionary: next?.dictionary ?? base.dictionary,
+                        };
+
+                        setLocalSections({
+                          main: {
+                            enabled: resolved.main.enabled,
+                            content:
+                              resolved.main.content ?? defaultSections!.main,
+                          },
+                          advanced: {
+                            enabled: resolved.advanced.enabled,
+                            content:
+                              resolved.advanced.content ??
+                              defaultSections!.advanced,
+                          },
+                          dictionary: {
+                            enabled: resolved.dictionary.enabled,
+                            content:
+                              resolved.dictionary.content ??
+                              defaultSections!.dictionary,
+                          },
+                        });
+
+                        saveProfileMetadata({ cleanup_prompt_sections: next });
+                      },
+                    })
+            }
+            onToggle={(checked) => handleToggle("dictionary", checked)}
+            onSave={(content) => handleSave("dictionary", content)}
+            onReset={() => handleReset("dictionary")}
+            isSaving={
+              updateCleanupPromptSections.isPending ||
+              updateRewriteProgramPromptProfiles.isPending
+            }
+          />
+        </Accordion>
+      </div>
     </>
   );
 }

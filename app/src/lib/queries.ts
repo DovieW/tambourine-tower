@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  type AppSettings,
   type CleanupPromptSections,
   configAPI,
   type HotkeyConfig,
@@ -28,110 +29,113 @@ export function useSettings() {
 }
 
 export function useUpdateToggleHotkey() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: async (hotkey: HotkeyConfig) => {
-			// Get current settings for validation
-			const settings = await tauriAPI.getSettings();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (hotkey: HotkeyConfig) => {
+      // Get current settings for validation
+      const settings = await tauriAPI.getSettings();
 
-			// Validate no duplicate
-			const error = validateHotkeyNotDuplicate(
-				hotkey,
-				{
-					toggle: settings.toggle_hotkey,
-					hold: settings.hold_hotkey,
-					paste_last: settings.paste_last_hotkey,
-				},
-				"toggle",
-			);
-			if (error) throw new Error(error);
+      // Validate no duplicate
+      const error = validateHotkeyNotDuplicate(
+        hotkey,
+        {
+          toggle: settings.toggle_hotkey,
+          hold: settings.hold_hotkey,
+          paste_last: settings.paste_last_hotkey,
+        },
+        "toggle"
+      );
+      if (error) throw new Error(error);
 
-			// Save and re-register
-			await tauriAPI.updateToggleHotkey(hotkey);
-			await tauriAPI.registerShortcuts();
-		},
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+      // Save and re-register
+      await tauriAPI.updateToggleHotkey(hotkey);
+      await tauriAPI.unregisterShortcuts();
+      await tauriAPI.registerShortcuts();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateHoldHotkey() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: async (hotkey: HotkeyConfig) => {
-			// Get current settings for validation
-			const settings = await tauriAPI.getSettings();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (hotkey: HotkeyConfig) => {
+      // Get current settings for validation
+      const settings = await tauriAPI.getSettings();
 
-			// Validate no duplicate
-			const error = validateHotkeyNotDuplicate(
-				hotkey,
-				{
-					toggle: settings.toggle_hotkey,
-					hold: settings.hold_hotkey,
-					paste_last: settings.paste_last_hotkey,
-				},
-				"hold",
-			);
-			if (error) throw new Error(error);
+      // Validate no duplicate
+      const error = validateHotkeyNotDuplicate(
+        hotkey,
+        {
+          toggle: settings.toggle_hotkey,
+          hold: settings.hold_hotkey,
+          paste_last: settings.paste_last_hotkey,
+        },
+        "hold"
+      );
+      if (error) throw new Error(error);
 
-			// Save and re-register
-			await tauriAPI.updateHoldHotkey(hotkey);
-			await tauriAPI.registerShortcuts();
-		},
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+      // Save and re-register
+      await tauriAPI.updateHoldHotkey(hotkey);
+      await tauriAPI.unregisterShortcuts();
+      await tauriAPI.registerShortcuts();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdatePasteLastHotkey() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: async (hotkey: HotkeyConfig) => {
-			// Get current settings for validation
-			const settings = await tauriAPI.getSettings();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (hotkey: HotkeyConfig) => {
+      // Get current settings for validation
+      const settings = await tauriAPI.getSettings();
 
-			// Validate no duplicate
-			const error = validateHotkeyNotDuplicate(
-				hotkey,
-				{
-					toggle: settings.toggle_hotkey,
-					hold: settings.hold_hotkey,
-					paste_last: settings.paste_last_hotkey,
-				},
-				"paste_last",
-			);
-			if (error) throw new Error(error);
+      // Validate no duplicate
+      const error = validateHotkeyNotDuplicate(
+        hotkey,
+        {
+          toggle: settings.toggle_hotkey,
+          hold: settings.hold_hotkey,
+          paste_last: settings.paste_last_hotkey,
+        },
+        "paste_last"
+      );
+      if (error) throw new Error(error);
 
-			// Save and re-register
-			await tauriAPI.updatePasteLastHotkey(hotkey);
-			await tauriAPI.registerShortcuts();
-		},
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+      // Save and re-register
+      await tauriAPI.updatePasteLastHotkey(hotkey);
+      await tauriAPI.unregisterShortcuts();
+      await tauriAPI.registerShortcuts();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateSelectedMic() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (micId: string | null) => tauriAPI.updateSelectedMic(micId),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (micId: string | null) => tauriAPI.updateSelectedMic(micId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateSoundEnabled() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (enabled: boolean) => tauriAPI.updateSoundEnabled(enabled),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => tauriAPI.updateSoundEnabled(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateRewriteLlmEnabled() {
@@ -149,53 +153,53 @@ export function useUpdateRewriteLlmEnabled() {
 }
 
 export function useUpdateAutoMuteAudio() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (enabled: boolean) => tauriAPI.updateAutoMuteAudio(enabled),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => tauriAPI.updateAutoMuteAudio(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateOverlayMode() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (mode: "always" | "never" | "recording_only") =>
-			tauriAPI.updateOverlayMode(mode),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: "always" | "never" | "recording_only") =>
+      tauriAPI.updateOverlayMode(mode),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateWidgetPosition() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (position: WidgetPosition) =>
-			tauriAPI.updateWidgetPosition(position),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (position: WidgetPosition) =>
+      tauriAPI.updateWidgetPosition(position),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useUpdateOutputMode() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: (mode: OutputMode) => tauriAPI.updateOutputMode(mode),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: OutputMode) => tauriAPI.updateOutputMode(mode),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 }
 
 export function useIsAudioMuteSupported() {
-	return useQuery({
-		queryKey: ["audioMuteSupported"],
-		queryFn: () => tauriAPI.isAudioMuteSupported(),
-		staleTime: Number.POSITIVE_INFINITY,
-	});
+  return useQuery({
+    queryKey: ["audioMuteSupported"],
+    queryFn: () => tauriAPI.isAudioMuteSupported(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
 }
 
 export function useUpdateCleanupPromptSections() {
@@ -206,7 +210,39 @@ export function useUpdateCleanupPromptSections() {
       // Apply prompt changes immediately (LLM step reads prompts from pipeline config).
       await configAPI.syncPipelineConfig();
     },
+    onMutate: async (sections: CleanupPromptSections | null) => {
+      // Optimistically update the settings cache so the UI doesn't snap back
+      // if the user navigates away before the mutation settles.
+      await queryClient.cancelQueries({ queryKey: ["settings"] });
+
+      const previousSettings = queryClient.getQueryData<AppSettings>([
+        "settings",
+      ]);
+
+      if (previousSettings) {
+        queryClient.setQueryData<AppSettings>(["settings"], {
+          ...previousSettings,
+          cleanup_prompt_sections: sections,
+        });
+      }
+
+      return { previousSettings };
+    },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (error, _sections, context) => {
+      console.error("updateCleanupPromptSections failed:", error);
+
+      // Roll back optimistic update.
+      if (context?.previousSettings) {
+        queryClient.setQueryData<AppSettings>(
+          ["settings"],
+          context.previousSettings
+        );
+      }
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
   });
@@ -219,26 +255,56 @@ export function useUpdateRewriteProgramPromptProfiles() {
       await tauriAPI.updateRewriteProgramPromptProfiles(profiles);
       await configAPI.syncPipelineConfig();
     },
-    onSuccess: () => {
+    onMutate: async (nextProfiles: RewriteProgramPromptProfile[]) => {
+      // Optimistically update the settings cache so toggles/selects don't
+      // "snap back" while the write + pipeline sync is running.
+      await queryClient.cancelQueries({ queryKey: ["settings"] });
+
+      const previousSettings = queryClient.getQueryData<AppSettings>([
+        "settings",
+      ]);
+
+      if (previousSettings) {
+        queryClient.setQueryData<AppSettings>(["settings"], {
+          ...previousSettings,
+          rewrite_program_prompt_profiles: nextProfiles,
+        });
+      }
+
+      return { previousSettings };
+    },
+    onError: (_error, _nextProfiles, context) => {
+      console.error("updateRewriteProgramPromptProfiles failed:", _error);
+      // Roll back optimistic update.
+      if (context?.previousSettings) {
+        queryClient.setQueryData<AppSettings>(
+          ["settings"],
+          context.previousSettings
+        );
+      }
+    },
+    onSettled: () => {
+      // Ensure we reconcile with persisted settings.
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
   });
 }
 
 export function useResetHotkeysToDefaults() {
-	const queryClient = useQueryClient();
-	return useMutation({
-		mutationFn: async () => {
-			await tauriAPI.resetHotkeysToDefaults();
-			await tauriAPI.registerShortcuts();
-		},
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["settings"] });
-		},
-		onError: (error) => {
-			console.error("Reset hotkeys failed:", error);
-		},
-	});
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      await tauriAPI.resetHotkeysToDefaults();
+      await tauriAPI.unregisterShortcuts();
+      await tauriAPI.registerShortcuts();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+    onError: (error) => {
+      console.error("Reset hotkeys failed:", error);
+    },
+  });
 }
 
 // History queries and mutations

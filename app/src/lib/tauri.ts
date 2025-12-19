@@ -47,11 +47,18 @@ export interface CleanupPromptSections {
 	dictionary: PromptSection;
 }
 
+// Per-profile prompt overrides: each section can be omitted/null to inherit from Default.
+export interface CleanupPromptSectionsOverride {
+  main?: PromptSection | null;
+  advanced?: PromptSection | null;
+  dictionary?: PromptSection | null;
+}
+
 export interface RewriteProgramPromptProfile {
   id: string;
   name: string;
   program_paths: string[];
-  cleanup_prompt_sections: CleanupPromptSections | null;
+  cleanup_prompt_sections: CleanupPromptSectionsOverride | null;
 
   // Per-profile gate for the optional LLM rewrite step (falls back to AppSettings.rewrite_llm_enabled)
   rewrite_llm_enabled?: boolean | null;
@@ -62,6 +69,15 @@ export interface RewriteProgramPromptProfile {
   stt_timeout_seconds?: number | null;
   llm_provider?: string | null;
   llm_model?: string | null;
+
+  // Per-profile overrides for Audio & Overlay (Option 1: override-or-inherit)
+  // NOTE: These are persisted in settings.json as part of the profile object.
+  // The backend may ignore them until it is updated to apply them at runtime.
+  sound_enabled?: boolean | null;
+  auto_mute_audio?: boolean | null;
+  overlay_mode?: OverlayMode | null;
+  widget_position?: WidgetPosition | null;
+  output_mode?: OutputMode | null;
 }
 
 export type OverlayMode = "always" | "never" | "recording_only";
@@ -240,6 +256,44 @@ export const tauriAPI = {
   async getSettings(): Promise<AppSettings> {
     const store = await getStore();
 
+    const normalizePromptSection = (value: any): PromptSection | null => {
+      if (value === null) return null;
+      if (!value || typeof value !== "object") return null;
+
+      const enabled =
+        typeof (value as any).enabled === "boolean"
+          ? (value as any).enabled
+          : true;
+      const content =
+        typeof (value as any).content === "string"
+          ? (value as any).content
+          : null;
+
+      return { enabled, content };
+    };
+
+    const normalizeCleanupPromptSectionsOverride = (
+      value: any
+    ): CleanupPromptSectionsOverride | null => {
+      if (value === null || value === undefined) return null;
+      if (!value || typeof value !== "object") return null;
+
+      const v = value as any;
+      const out: CleanupPromptSectionsOverride = {};
+
+      if (Object.prototype.hasOwnProperty.call(v, "main")) {
+        out.main = normalizePromptSection(v.main);
+      }
+      if (Object.prototype.hasOwnProperty.call(v, "advanced")) {
+        out.advanced = normalizePromptSection(v.advanced);
+      }
+      if (Object.prototype.hasOwnProperty.call(v, "dictionary")) {
+        out.dictionary = normalizePromptSection(v.dictionary);
+      }
+
+      return out;
+    };
+
     const normalizeRewriteProfile = (
       p: any
     ): RewriteProgramPromptProfile | null => {
@@ -257,8 +311,9 @@ export const tauriAPI = {
         ? [legacy_program_path]
         : [];
 
-      const cleanup_prompt_sections =
-        (p as any).cleanup_prompt_sections ?? null;
+      const cleanup_prompt_sections = normalizeCleanupPromptSectionsOverride(
+        (p as any).cleanup_prompt_sections
+      );
       const stt_provider =
         typeof (p as any).stt_provider === "string"
           ? (p as any).stt_provider
@@ -280,6 +335,38 @@ export const tauriAPI = {
           ? (p as any).rewrite_llm_enabled
           : null;
 
+      const sound_enabled =
+        typeof (p as any).sound_enabled === "boolean"
+          ? (p as any).sound_enabled
+          : null;
+      const auto_mute_audio =
+        typeof (p as any).auto_mute_audio === "boolean"
+          ? (p as any).auto_mute_audio
+          : null;
+
+      const overlay_mode =
+        (p as any).overlay_mode === "always" ||
+        (p as any).overlay_mode === "never" ||
+        (p as any).overlay_mode === "recording_only"
+          ? ((p as any).overlay_mode as OverlayMode)
+          : null;
+
+      const widget_position =
+        (p as any).widget_position === "center" ||
+        (p as any).widget_position === "top-left" ||
+        (p as any).widget_position === "top-center" ||
+        (p as any).widget_position === "top-right" ||
+        (p as any).widget_position === "bottom-left" ||
+        (p as any).widget_position === "bottom-center" ||
+        (p as any).widget_position === "bottom-right"
+          ? ((p as any).widget_position as WidgetPosition)
+          : null;
+
+      const output_mode =
+        typeof (p as any).output_mode === "string"
+          ? normalizeOutputMode((p as any).output_mode)
+          : null;
+
       if (!id) return null;
 
       return {
@@ -293,6 +380,11 @@ export const tauriAPI = {
         stt_timeout_seconds,
         llm_provider,
         llm_model,
+        sound_enabled,
+        auto_mute_audio,
+        overlay_mode,
+        widget_position,
+        output_mode,
       };
     };
 

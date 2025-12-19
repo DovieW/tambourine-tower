@@ -1,5 +1,5 @@
 import { Kbd } from "@mantine/core";
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRecordHotkeys } from "react-hotkeys-hook";
 import type { HotkeyConfig } from "../lib/tauri";
 import { tauriAPI } from "../lib/tauri";
@@ -201,146 +201,157 @@ export function HotkeyInput({
 	onStartRecording,
 	onStopRecording,
 }: HotkeyInputProps) {
-	const [keys, { start, stop, isRecording: internalIsRecording }] =
-		useRecordHotkeys();
+  const [keys, { start, stop, isRecording: internalIsRecording }] =
+    useRecordHotkeys();
 
-	// Use external state if provided, otherwise use internal
-	const isRecording = externalIsRecording ?? internalIsRecording;
+  // Use external state if provided, otherwise use internal
+  const isRecording = externalIsRecording ?? internalIsRecording;
 
-	// Unregister global shortcuts when recording starts, re-register when done
-	useEffect(() => {
-		if (isRecording) {
-			tauriAPI.unregisterShortcuts().catch(console.error);
-		} else {
-			tauriAPI.registerShortcuts().catch(console.error);
-		}
-	}, [isRecording]);
+  // Unregister global shortcuts when recording starts, re-register when done.
+  // Important: multiple <HotkeyInput/> instances mount in the settings UI.
+  // If each one calls registerShortcuts() on mount (or in StrictMode double-invoked
+  // effects), Tauri will error with "HotKey already registered".
+  const wasRecordingRef = useRef(false);
+  useEffect(() => {
+    // Transition: not recording -> recording
+    if (isRecording && !wasRecordingRef.current) {
+      wasRecordingRef.current = true;
+      tauriAPI.unregisterShortcuts().catch(console.error);
+      return;
+    }
 
-	// Handle Escape key to cancel recording
-	useEffect(() => {
-		if (!isRecording) return;
+    // Transition: recording -> not recording
+    if (!isRecording && wasRecordingRef.current) {
+      wasRecordingRef.current = false;
+      tauriAPI.registerShortcuts().catch(console.error);
+    }
+  }, [isRecording]);
 
-		const handleEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
-				event.preventDefault();
-				stop();
-				onStopRecording?.();
-			}
-		};
+  // Handle Escape key to cancel recording
+  useEffect(() => {
+    if (!isRecording) return;
 
-		document.addEventListener("keydown", handleEscape);
-		return () => document.removeEventListener("keydown", handleEscape);
-	}, [isRecording, stop, onStopRecording]);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        stop();
+        onStopRecording?.();
+      }
+    };
 
-	// Watch for key changes and update when we have a valid combination
-	useEffect(() => {
-		if (!isRecording) return;
-		if (keys.size === 0) return;
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [isRecording, stop, onStopRecording]);
 
-		// Check if Escape was pressed (handled separately)
-		if (keys.has("escape")) {
-			return;
-		}
+  // Watch for key changes and update when we have a valid combination
+  useEffect(() => {
+    if (!isRecording) return;
+    if (keys.size === 0) return;
 
-		const config = keysToConfig(keys);
-		if (config) {
-			onChange(config);
-			stop();
-			onStopRecording?.();
-		}
-	}, [keys, isRecording, onChange, stop, onStopRecording]);
+    // Check if Escape was pressed (handled separately)
+    if (keys.has("escape")) {
+      return;
+    }
 
-	// Sync internal recording state with external state
-	useEffect(() => {
-		if (externalIsRecording === true && !internalIsRecording) {
-			start();
-		} else if (externalIsRecording === false && internalIsRecording) {
-			stop();
-		}
-	}, [externalIsRecording, internalIsRecording, start, stop]);
+    const config = keysToConfig(keys);
+    if (config) {
+      onChange(config);
+      stop();
+      onStopRecording?.();
+    }
+  }, [keys, isRecording, onChange, stop, onStopRecording]);
 
-	const handleClick = () => {
-		if (disabled) return;
+  // Sync internal recording state with external state
+  useEffect(() => {
+    if (externalIsRecording === true && !internalIsRecording) {
+      start();
+    } else if (externalIsRecording === false && internalIsRecording) {
+      stop();
+    }
+  }, [externalIsRecording, internalIsRecording, start, stop]);
 
-		if (isRecording) {
-			// Clicking again cancels
-			stop();
-			onStopRecording?.();
-		} else {
-			start();
-			onStartRecording?.();
-		}
-	};
+  const handleClick = () => {
+    if (disabled) return;
 
-	// Build live preview of current keys being pressed
-	const livePreview = Array.from(keys)
-		.filter((k) => k !== "escape")
-		.map((k) => formatKeyForDisplay(k));
+    if (isRecording) {
+      // Clicking again cancels
+      stop();
+      onStopRecording?.();
+    } else {
+      start();
+      onStartRecording?.();
+    }
+  };
 
-	return (
-		<div>
-			<p className="settings-label">{label}</p>
-			{description && <p className="settings-description">{description}</p>}
-			<button
-				type="button"
-				onClick={handleClick}
-				disabled={disabled}
-				className={`hotkey-display ${isRecording ? "capturing" : ""}`}
-				style={{
-					width: "100%",
-					marginTop: 8,
-					cursor: disabled ? "not-allowed" : "pointer",
-					opacity: disabled ? 0.5 : 1,
-				}}
-			>
-				{isRecording ? (
-					<div
-						style={{
-							display: "flex",
-							alignItems: "center",
-							justifyContent: "center",
-							gap: 8,
-						}}
-					>
-						{livePreview.length > 0 ? (
-							<>
-								{livePreview.map((part) => (
-									<Kbd key={part}>{part}</Kbd>
-								))}
-								<span
-									style={{
-										color: "var(--text-secondary)",
-										fontSize: 12,
-										marginLeft: 4,
-									}}
-								>
-									release to save
-								</span>
-							</>
-						) : (
-							<span style={{ color: "var(--accent-primary)", fontSize: 14 }}>
-								Press a key or combination...
-							</span>
-						)}
-						<span
-							style={{
-								color: "var(--text-tertiary)",
-								fontSize: 11,
-								marginLeft: 8,
-							}}
-						>
-							(Esc to cancel)
-						</span>
-					</div>
-				) : (
-					<>
-						{value.modifiers.concat([value.key]).map((part) => (
-							<Kbd key={part}>{formatKeyForDisplay(part)}</Kbd>
-						))}
-						<span className="hotkey-hint">Click to change</span>
-					</>
-				)}
-			</button>
-		</div>
-	);
+  // Build live preview of current keys being pressed
+  const livePreview = Array.from(keys)
+    .filter((k) => k !== "escape")
+    .map((k) => formatKeyForDisplay(k));
+
+  return (
+    <div>
+      <p className="settings-label">{label}</p>
+      {description && <p className="settings-description">{description}</p>}
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={disabled}
+        className={`hotkey-display ${isRecording ? "capturing" : ""}`}
+        style={{
+          width: "100%",
+          marginTop: 8,
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.5 : 1,
+        }}
+      >
+        {isRecording ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+            }}
+          >
+            {livePreview.length > 0 ? (
+              <>
+                {livePreview.map((part) => (
+                  <Kbd key={part}>{part}</Kbd>
+                ))}
+                <span
+                  style={{
+                    color: "var(--text-secondary)",
+                    fontSize: 12,
+                    marginLeft: 4,
+                  }}
+                >
+                  release to save
+                </span>
+              </>
+            ) : (
+              <span style={{ color: "var(--accent-primary)", fontSize: 14 }}>
+                Press a key or combination...
+              </span>
+            )}
+            <span
+              style={{
+                color: "var(--text-tertiary)",
+                fontSize: 11,
+                marginLeft: 8,
+              }}
+            >
+              (Esc to cancel)
+            </span>
+          </div>
+        ) : (
+          <>
+            {value.modifiers.concat([value.key]).map((part) => (
+              <Kbd key={part}>{formatKeyForDisplay(part)}</Kbd>
+            ))}
+            <span className="hotkey-hint">Click to change</span>
+          </>
+        )}
+      </button>
+    </div>
+  );
 }

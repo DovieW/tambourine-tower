@@ -926,10 +926,14 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
     }
 
     // Read rewrite prompt sections + per-program profiles from store
+    //
+    // `cleanup_prompt_sections` is treated as overrides on top of the built-in defaults.
+    // Each program profile can further override individual sections.
     let cleanup_prompt_sections: Option<settings::CleanupPromptSectionsSetting> =
         get_setting_from_store(app, "cleanup_prompt_sections", None);
     let base_prompts: llm::PromptSections = cleanup_prompt_sections
-        .map(Into::into)
+        .as_ref()
+        .map(|o| o.apply_to(&llm::PromptSections::default()))
         .unwrap_or_else(llm::PromptSections::default);
 
     let rewrite_program_prompt_profiles: Vec<settings::RewriteProgramPromptProfile> =
@@ -943,7 +947,8 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
             program_paths: p.program_paths,
             prompts: p
                 .cleanup_prompt_sections
-                .map(Into::into)
+                .as_ref()
+                .map(|o| o.apply_to(&base_prompts))
                 .unwrap_or_else(|| base_prompts.clone()),
             rewrite_llm_enabled: p.rewrite_llm_enabled,
             stt_provider: p.stt_provider,
