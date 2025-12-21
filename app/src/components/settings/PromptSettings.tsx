@@ -195,9 +195,7 @@ export function PromptSettings({
     string | number
   >(DEFAULT_STT_TIMEOUT);
 
-  const [rewriteTestInput, setRewriteTestInput] = useState<string>(
-    "um hello there uh how are you"
-  );
+  const [rewriteTestInput, setRewriteTestInput] = useState<string>("");
   const [rewriteTestOutput, setRewriteTestOutput] = useState<string>("");
   const [rewriteTestError, setRewriteTestError] = useState<string>("");
   const [rewriteTestDurationMs, setRewriteTestDurationMs] = useState<
@@ -487,7 +485,7 @@ export function PromptSettings({
       return `The selected Groq model (${modelLabel}) does not support transcription prompting.`;
     }
 
-    return "Transcription prompt is supported for OpenAI transcription models and Groq Whisper models.";
+    return "Transcription prompt is only supported for certain models.";
   }, [effectiveSttProvider, effectiveSttModel]);
 
   // Keep the local UI state in sync with persisted settings.
@@ -1117,9 +1115,6 @@ export function PromptSettings({
                       marginBottom: 6,
                     }}
                   >
-                    <Text size="sm" c="dimmed">
-                      Prompt (optional)
-                    </Text>
                     {isPrompt224CharLimited ? (
                       <Text size="xs" c="dimmed">
                         {localSttTranscriptionPrompt.length}/{promptMaxChars}{" "}
@@ -1162,13 +1157,6 @@ export function PromptSettings({
                       },
                     }}
                   />
-
-                  <Text size="xs" c="dimmed" style={{ marginTop: 6 }}>
-                    OpenAI transcription models and Groq Whisper models accept
-                    an optional <code>prompt</code>. For Whisper-style models,
-                    docs commonly note only the first 224 tokens are considered;
-                    this UI conservatively limits it to 224 characters.
-                  </Text>
                 </div>
               </div>
             </Accordion.Panel>
@@ -1564,7 +1552,7 @@ export function PromptSettings({
                   onChange={(e) => {
                     setRewriteTestInput(e.currentTarget.value);
                   }}
-                  placeholder="um like okay so today we're going to talk about..."
+                  placeholder="Prompt"
                   autosize
                   minRows={3}
                   styles={{
@@ -1627,7 +1615,9 @@ export function PromptSettings({
                       ? "Duration: running…"
                       : rewriteTestDurationMs === null
                       ? "Duration: —"
-                      : `Duration: ${(rewriteTestDurationMs / 1000).toFixed(2)}s`}
+                      : `Duration: ${(rewriteTestDurationMs / 1000).toFixed(
+                          2
+                        )}s`}
                   </Text>
                 </div>
 
