@@ -125,6 +125,7 @@ function AudioWave({
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastPointsRef = useRef<Float32Array | null>(null);
+  const smoothedPeakRef = useRef(0);
 
   const cleanupAudio = useCallback(() => {
     if (animationRef.current) {
@@ -148,6 +149,7 @@ function AudioWave({
 
     analyserRef.current = null;
     lastPointsRef.current = null;
+    smoothedPeakRef.current = 0;
   }, []);
 
   useEffect(() => {
@@ -229,11 +231,27 @@ function AudioWave({
 
     const setupAudio = async () => {
       try {
+        // For visualization we want a signal with more natural dynamics.
+        // Try to disable browser post-processing (noise suppression / AGC) when supported.
+        const baseTrackConstraints: MediaTrackConstraints = {
+          echoCancellation: false,
+          noiseSuppression: false,
+        };
+        // Not all TS DOM libs include autoGainControl yet.
+        (
+          baseTrackConstraints as MediaTrackConstraints & {
+            autoGainControl?: boolean;
+          }
+        ).autoGainControl = false;
+
         const constraints: MediaStreamConstraints = {
           audio:
             selectedMicId && selectedMicId.length > 0
-              ? { deviceId: { exact: selectedMicId } }
-              : true,
+              ? {
+                  ...baseTrackConstraints,
+                  deviceId: { exact: selectedMicId },
+                }
+              : baseTrackConstraints,
         };
 
         let stream: MediaStream;
@@ -257,11 +275,22 @@ function AudioWave({
         streamRef.current = stream;
         const audioContext = new AudioContext();
         audioContextRef.current = audioContext;
+
+        // If recording starts via a global shortcut (not a direct user gesture),
+        // some environments may create the AudioContext in a suspended state.
+        // Resuming is safe even if already running.
+        try {
+          await audioContext.resume();
+        } catch {
+          // ignore
+        }
+
         const source = audioContext.createMediaStreamSource(stream);
         const analyser = audioContext.createAnalyser();
         // Higher resolution + smoother motion.
         analyser.fftSize = 2048;
-        analyser.smoothingTimeConstant = 0.85;
+        // Some smoothing keeps the line stable; we'll add responsiveness via our own gain.
+        analyser.smoothingTimeConstant = 0.75;
         source.connect(analyser);
         analyserRef.current = analyser;
 
@@ -278,8 +307,8 @@ function AudioWave({
           if (!ctx) return;
 
           // HiDPI: scale the backing store to devicePixelRatio for crisp lines.
-          const logicalW = canvas.clientWidth || canvas.width;
-          const logicalH = canvas.clientHeight || canvas.height;
+          const logicalW = canvas.clientWidth > 0 ? canvas.clientWidth : 168;
+          const logicalH = canvas.clientHeight > 0 ? canvas.clientHeight : 24;
           const dpr = window.devicePixelRatio || 1;
           const targetW = Math.max(1, Math.floor(logicalW * dpr));
           const targetH = Math.max(1, Math.floor(logicalH * dpr));
@@ -297,12 +326,58 @@ function AudioWave({
           analyserNode.getByteTimeDomainData(dataArray);
 
           // Downsample the waveform to a fixed number of points to keep it smooth.
-          const points = 64;
+          const points = 96;
           const next = new Float32Array(points);
           for (let i = 0; i < points; i++) {
             const idx = Math.floor((i / (points - 1)) * (bufferLength - 1));
             const v = (dataArray[idx] ?? 128) - 128;
             next[i] = v / 128;
+          }
+
+          // Auto-gain: normalize based on the *raw* peak so quiet mics still animate.
+          // We'll apply a small deadzone after gain to keep silence from buzzing.
+          let peak = 0;
+          let sumSq = 0;
+          for (let i = 0; i < points; i++) {
+            const a = Math.abs(next[i] ?? 0);
+            if (a > peak) peak = a;
+            const v = next[i] ?? 0;
+            sumSq += v * v;
+          }
+
+          // Voice energy (0..1) based on RMS.
+          // Tuned to kick in earlier on quiet mics while the deadzone keeps silence calm.
+          const rms = Math.sqrt(sumSq / points);
+          const voiceEnergy = Math.min(1, Math.max(0, (rms - 0.008) / 0.06));
+
+          const prevPeak = smoothedPeakRef.current;
+          // Relatively quick decay so gain relaxes when you stop speaking.
+          const decayed = prevPeak * 0.9;
+          smoothedPeakRef.current = Math.max(peak, decayed);
+
+          // Floor prevents runaway gain on background noise.
+          const effectivePeak = Math.max(0.03, smoothedPeakRef.current);
+          const targetPeak = 0.85 + voiceEnergy * 0.3;
+          const maxGain = 9 + voiceEnergy * 6;
+          const gain = Math.min(
+            maxGain,
+            Math.max(1, targetPeak / effectivePeak)
+          );
+
+          // Post-gain deadzone + soft clipping:
+          // - deadzone calms near-silence
+          // - tanh keeps big peaks from slamming flat
+          const deadzone = Math.max(0.03, 0.065 - voiceEnergy * 0.03);
+          for (let i = 0; i < points; i++) {
+            const v = (next[i] ?? 0) * gain;
+            const a = Math.abs(v);
+            if (a <= deadzone) {
+              next[i] = 0;
+              continue;
+            }
+            const s = v < 0 ? -1 : 1;
+            const gated = (a - deadzone) / (1 - deadzone);
+            next[i] = s * Math.tanh(gated * (1.1 + voiceEnergy * 0.4));
           }
 
           // Smooth between frames to avoid jitter.
@@ -319,8 +394,10 @@ function AudioWave({
           }
 
           const wave = lastPointsRef.current ?? next;
+
           const midY = logicalH / 2;
-          const amp = logicalH * 0.36;
+          // Taller peaks when voice is present.
+          const amp = logicalH * (0.58 + voiceEnergy * 0.28);
 
           const grad = ctx.createLinearGradient(0, 0, logicalW, 0);
           grad.addColorStop(0, "rgba(255,255,255,0.60)");
@@ -372,6 +449,8 @@ function AudioWave({
   return (
     <canvas
       ref={canvasRef}
+      width={168}
+      height={24}
       className="overlay-wave"
       style={{ display: "block" }}
     />
