@@ -70,7 +70,7 @@ export interface RewriteProgramPromptProfile {
   llm_provider?: string | null;
   llm_model?: string | null;
 
-  // Per-profile overrides for Audio & Overlay (Option 1: override-or-inherit)
+  // Per-profile overrides for UI (Option 1: override-or-inherit)
   // NOTE: These are persisted in settings.json as part of the profile object.
   // The backend may ignore them until it is updated to apply them at runtime.
   sound_enabled?: boolean | null;
@@ -130,6 +130,12 @@ export interface AppSettings {
   overlay_mode: OverlayMode;
   widget_position: WidgetPosition;
   output_mode: OutputMode;
+
+  // Hallucination protection (quiet-audio gate)
+  quiet_audio_gate_enabled: boolean;
+  quiet_audio_min_duration_secs: number;
+  quiet_audio_rms_dbfs_threshold: number;
+  quiet_audio_peak_dbfs_threshold: number;
 }
 
 function normalizePlayingAudioHandling(value: unknown): PlayingAudioHandling {
@@ -462,6 +468,15 @@ export const tauriAPI = {
       widget_position:
         (await store.get<WidgetPosition>("widget_position")) ?? "bottom-right",
       output_mode: normalizeOutputMode(await store.get("output_mode")),
+
+      quiet_audio_gate_enabled:
+        (await store.get<boolean>("quiet_audio_gate_enabled")) ?? true,
+      quiet_audio_min_duration_secs:
+        (await store.get<number>("quiet_audio_min_duration_secs")) ?? 0.15,
+      quiet_audio_rms_dbfs_threshold:
+        (await store.get<number>("quiet_audio_rms_dbfs_threshold")) ?? -50,
+      quiet_audio_peak_dbfs_threshold:
+        (await store.get<number>("quiet_audio_peak_dbfs_threshold")) ?? -40,
     };
   },
 
@@ -591,6 +606,30 @@ export const tauriAPI = {
   async updateOutputMode(mode: OutputMode): Promise<void> {
     const store = await getStore();
     await store.set("output_mode", mode);
+    await store.save();
+  },
+
+  async updateQuietAudioGateEnabled(enabled: boolean): Promise<void> {
+    const store = await getStore();
+    await store.set("quiet_audio_gate_enabled", enabled);
+    await store.save();
+  },
+
+  async updateQuietAudioMinDurationSecs(seconds: number): Promise<void> {
+    const store = await getStore();
+    await store.set("quiet_audio_min_duration_secs", seconds);
+    await store.save();
+  },
+
+  async updateQuietAudioRmsDbfsThreshold(dbfs: number): Promise<void> {
+    const store = await getStore();
+    await store.set("quiet_audio_rms_dbfs_threshold", dbfs);
+    await store.save();
+  },
+
+  async updateQuietAudioPeakDbfsThreshold(dbfs: number): Promise<void> {
+    const store = await getStore();
+    await store.set("quiet_audio_peak_dbfs_threshold", dbfs);
     await store.save();
   },
 

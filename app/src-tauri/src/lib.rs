@@ -94,66 +94,12 @@ fn emit_system_event(app: &AppHandle, event_type: &str, message: &str, details: 
     let _ = app.emit("system-event", event);
 }
 
-/// Filter out common Whisper hallucinations from transcription
-/// These are phrases that Whisper generates for silent or unclear audio
-fn filter_whisper_hallucinations(transcript: &str) -> Option<String> {
+/// Normalize transcript text for output.
+///
+/// We intentionally keep this conservative: the pipeline now performs a
+/// quiet-audio gate before STT to avoid "silent audio" hallucinations.
+fn sanitize_transcript(transcript: &str) -> Option<String> {
     let trimmed = transcript.trim();
-
-    // Common Whisper hallucinations (case-insensitive)
-    let hallucinations = [
-        "thank you",
-        "thanks for watching",
-        "thanks for listening",
-        "see you next time",
-        "bye",
-        "goodbye",
-        "see you",
-        "the end",
-        "...",
-        "you",
-        "i'm sorry",
-        "sorry",
-        "okay",
-        "ok",
-        "yes",
-        "no",
-        "um",
-        "uh",
-        "hmm",
-        "mm",
-        "ah",
-        "oh",
-        "huh",
-        "silence",
-        "[silence]",
-        "(silence)",
-        "[music]",
-        "(music)",
-        "[applause]",
-        "(applause)",
-        "[laughter]",
-        "(laughter)",
-        "please subscribe",
-        "like and subscribe",
-    ];
-
-    let lower = trimmed.to_lowercase();
-
-    // Check if the entire transcript matches a hallucination phrase
-    for phrase in hallucinations {
-        // Match exact phrase or phrase with trailing punctuation
-        if lower == phrase
-            || lower == format!("{}.", phrase)
-            || lower == format!("{}!", phrase)
-            || lower == format!("{}?", phrase)
-            || lower == format!("{}...", phrase)
-        {
-            log::info!("Filtered Whisper hallucination: '{}'", trimmed);
-            return None;
-        }
-    }
-
-    // Return the original (with whitespace trimmed) if not a hallucination
     if trimmed.is_empty() {
         None
     } else {
@@ -473,8 +419,9 @@ fn stop_recording(
                 Ok(result) => {
                     log::info!("Transcription complete: {} chars", result.final_text.len());
 
-                    // Filter out common Whisper hallucinations (applied to the pipeline's final text)
-                    let filtered_transcript = filter_whisper_hallucinations(&result.final_text);
+                    // Final output after pipeline (STT + optional LLM) normalization.
+                    // Quiet recordings should already have been skipped in the pipeline.
+                    let filtered_transcript = sanitize_transcript(&result.final_text);
 
                     // Update request log store
                     if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
@@ -531,7 +478,7 @@ fn stop_recording(
                             }
 
                             if filtered_transcript.is_none() {
-                                log.warn("Transcript filtered as hallucination, nothing output");
+                                log.warn("No transcript output (empty/whitespace)");
                             }
 
                             log.complete_success();
@@ -562,7 +509,7 @@ fn stop_recording(
                     } else {
                         // Emit empty transcript event so UI can update appropriately
                         let _ = app_clone.emit("pipeline-transcript-ready", "");
-                        log::info!("Transcript filtered as hallucination, not outputting");
+                        log::info!("No transcript output (empty/whitespace), not outputting");
                     }
 
                     // Hide overlay after transcription completes if in "recording_only" mode.
@@ -1116,6 +1063,29 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
     let vad_settings: settings::VadSettings =
         get_setting_from_store(app, "vad_settings", settings::VadSettings::default());
 
+    // Read quiet-audio gate settings from store
+    let default_pipeline_config = pipeline::PipelineConfig::default();
+    let quiet_audio_gate_enabled: bool = get_setting_from_store(
+        app,
+        "quiet_audio_gate_enabled",
+        default_pipeline_config.quiet_audio_gate_enabled,
+    );
+    let quiet_audio_min_duration_secs: f32 = get_setting_from_store(
+        app,
+        "quiet_audio_min_duration_secs",
+        default_pipeline_config.quiet_audio_min_duration_secs,
+    );
+    let quiet_audio_rms_dbfs_threshold: f32 = get_setting_from_store(
+        app,
+        "quiet_audio_rms_dbfs_threshold",
+        default_pipeline_config.quiet_audio_rms_dbfs_threshold,
+    );
+    let quiet_audio_peak_dbfs_threshold: f32 = get_setting_from_store(
+        app,
+        "quiet_audio_peak_dbfs_threshold",
+        default_pipeline_config.quiet_audio_peak_dbfs_threshold,
+    );
+
     // Read LLM settings from store
     let rewrite_llm_enabled: bool = get_setting_from_store(app, "rewrite_llm_enabled", false);
     let llm_provider_setting: Option<String> = get_setting_from_store(app, "llm_provider", None);
@@ -1201,6 +1171,12 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
         vad_config: vad_settings.to_vad_auto_stop_config(),
         transcription_timeout: Duration::from_secs_f64(stt_timeout_seconds),
         max_recording_bytes: 50 * 1024 * 1024, // 50MB
+
+        quiet_audio_gate_enabled,
+        quiet_audio_min_duration_secs,
+        quiet_audio_rms_dbfs_threshold,
+        quiet_audio_peak_dbfs_threshold,
+
         llm_config: llm::LlmConfig {
             enabled: llm_enabled,
             provider: llm_provider_effective,

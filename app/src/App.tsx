@@ -19,6 +19,7 @@ import {
   HotkeySettings,
   PromptSettings,
   ProfileConfigModal,
+  UiSettings,
 } from "./components/settings";
 import {
   DEFAULT_HOLD_HOTKEY,
@@ -346,7 +347,8 @@ function SettingsView() {
         <Tabs.List>
           <Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
           <Tabs.Tab value="ai">AI</Tabs.Tab>
-          <Tabs.Tab value="audio">Audio &amp; Overlay</Tabs.Tab>
+          <Tabs.Tab value="ui">UI</Tabs.Tab>
+          <Tabs.Tab value="audio">Audio</Tabs.Tab>
           <Tabs.Tab value="hotkeys">Hotkeys</Tabs.Tab>
         </Tabs.List>
 
@@ -359,6 +361,12 @@ function SettingsView() {
         <Tabs.Panel value="ai" pt="md">
           <div className="settings-card">
             <PromptSettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="ui" pt="md">
+          <div className="settings-card">
+            <UiSettings editingProfileId={editingProfileId} />
           </div>
         </Tabs.Panel>
 

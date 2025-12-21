@@ -93,6 +93,38 @@ impl AudioBuffer {
         self.samples.len() as f32 / (self.sample_rate as f32 * self.channels as f32)
     }
 
+    /// Compute simple signal level statistics over the captured samples.
+    ///
+    /// Samples are expected to be normalized floats in [-1.0, 1.0].
+    pub fn level_stats(&self) -> AudioLevelStats {
+        let mut peak: f32 = 0.0;
+        let mut sum_sq: f64 = 0.0;
+        let mut n: u64 = 0;
+
+        for &s in &self.samples {
+            let a = s.abs();
+            if a > peak {
+                peak = a;
+            }
+
+            // Promote to f64 for numerical stability on long recordings.
+            sum_sq += (s as f64) * (s as f64);
+            n += 1;
+        }
+
+        let rms = if n == 0 {
+            0.0
+        } else {
+            (sum_sq / n as f64).sqrt() as f32
+        };
+
+        AudioLevelStats {
+            duration_secs: self.duration_secs(),
+            rms,
+            peak,
+        }
+    }
+
     /// Convert the buffer contents to WAV bytes
     pub fn to_wav_bytes(&self) -> Result<Vec<u8>, AudioCaptureError> {
         let spec = WavSpec {
@@ -132,6 +164,16 @@ impl AudioBuffer {
     pub fn channels(&self) -> u16 {
         self.channels
     }
+}
+
+/// Basic audio level metrics for gating/diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioLevelStats {
+    pub duration_secs: f32,
+    /// Root-mean-square amplitude in [0, 1].
+    pub rms: f32,
+    /// Peak (max absolute) amplitude in [0, 1].
+    pub peak: f32,
 }
 
 /// Commands sent to the audio capture thread
@@ -290,16 +332,32 @@ impl AudioCapture {
 
     /// Stop recording and return the captured audio as WAV bytes
     pub fn stop_and_get_wav(&mut self) -> Result<Vec<u8>, AudioCaptureError> {
+        let (wav_bytes, _stats) = self.stop_and_get_wav_with_stats()?;
+        Ok(wav_bytes)
+    }
+
+    /// Stop recording and return the captured audio as WAV bytes along with level stats.
+    pub fn stop_and_get_wav_with_stats(
+        &mut self,
+    ) -> Result<(Vec<u8>, AudioLevelStats), AudioCaptureError> {
         self.stop();
 
         let buffer = self.buffer.lock().map_err(|_| {
             AudioCaptureError::Encoding("Failed to lock buffer".to_string())
         })?;
 
+        let stats = buffer.level_stats();
         let wav_bytes = buffer.to_wav_bytes()?;
-        log::info!("Audio capture stopped, {} bytes captured", wav_bytes.len());
 
-        Ok(wav_bytes)
+        log::info!(
+            "Audio capture stopped, {} bytes captured (duration {:.2}s, rms {:.6}, peak {:.6})",
+            wav_bytes.len(),
+            stats.duration_secs,
+            stats.rms,
+            stats.peak
+        );
+
+        Ok((wav_bytes, stats))
     }
 
     /// Stop recording without returning audio data

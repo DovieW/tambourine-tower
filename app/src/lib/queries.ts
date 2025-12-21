@@ -196,6 +196,58 @@ export function useUpdateOutputMode() {
   });
 }
 
+export function useUpdateQuietAudioGateEnabled() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await tauriAPI.updateQuietAudioGateEnabled(enabled);
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
+export function useUpdateQuietAudioMinDurationSecs() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (seconds: number) => {
+      await tauriAPI.updateQuietAudioMinDurationSecs(seconds);
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
+export function useUpdateQuietAudioRmsDbfsThreshold() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (dbfs: number) => {
+      await tauriAPI.updateQuietAudioRmsDbfsThreshold(dbfs);
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
+export function useUpdateQuietAudioPeakDbfsThreshold() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (dbfs: number) => {
+      await tauriAPI.updateQuietAudioPeakDbfsThreshold(dbfs);
+      await configAPI.syncPipelineConfig();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
 export function useIsAudioMuteSupported() {
   return useQuery({
     queryKey: ["audioMuteSupported"],

@@ -415,6 +415,36 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
+    // Read quiet-audio gate settings from store
+    let default_pipeline_config = PipelineConfig::default();
+    let quiet_audio_gate_enabled: bool = app
+        .store("settings.json")
+        .ok()
+        .and_then(|store| store.get("quiet_audio_gate_enabled"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(default_pipeline_config.quiet_audio_gate_enabled);
+
+    let quiet_audio_min_duration_secs: f32 = app
+        .store("settings.json")
+        .ok()
+        .and_then(|store| store.get("quiet_audio_min_duration_secs"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(default_pipeline_config.quiet_audio_min_duration_secs);
+
+    let quiet_audio_rms_dbfs_threshold: f32 = app
+        .store("settings.json")
+        .ok()
+        .and_then(|store| store.get("quiet_audio_rms_dbfs_threshold"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(default_pipeline_config.quiet_audio_rms_dbfs_threshold);
+
+    let quiet_audio_peak_dbfs_threshold: f32 = app
+        .store("settings.json")
+        .ok()
+        .and_then(|store| store.get("quiet_audio_peak_dbfs_threshold"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or(default_pipeline_config.quiet_audio_peak_dbfs_threshold);
+
     let config = PipelineConfig {
         stt_provider: stt_provider.clone(),
         stt_api_key,
@@ -425,6 +455,12 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         vad_config: vad_settings.to_vad_auto_stop_config(),
         transcription_timeout: std::time::Duration::from_secs_f64(stt_timeout_seconds),
         max_recording_bytes: 50 * 1024 * 1024, // 50MB
+
+        quiet_audio_gate_enabled,
+        quiet_audio_min_duration_secs,
+        quiet_audio_rms_dbfs_threshold,
+        quiet_audio_peak_dbfs_threshold,
+
         llm_config: crate::llm::LlmConfig {
             enabled: llm_enabled,
             provider: llm_provider_effective,

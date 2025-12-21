@@ -15,7 +15,7 @@
 //! - Multiple provider support (OpenAI, Anthropic, Ollama)
 //! - Configurable prompts for dictation cleanup
 
-use crate::audio_capture::{AudioCapture, AudioCaptureError, AudioCaptureEvent, VadAutoStopConfig};
+use crate::audio_capture::{AudioCapture, AudioCaptureError, AudioCaptureEvent, AudioLevelStats, VadAutoStopConfig};
 use crate::llm::{
     format_text, AnthropicLlmProvider, GroqLlmProvider, LlmConfig, LlmError, LlmProvider,
     OllamaLlmProvider, OpenAiLlmProvider,
@@ -78,6 +78,38 @@ const DEFAULT_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum WAV file size in bytes (50MB) to prevent memory issues
 const MAX_WAV_SIZE_BYTES: usize = 50 * 1024 * 1024;
+
+/// Default values for the quiet-audio gate.
+///
+/// Thresholds are in dBFS (decibels relative to full scale, where 0 dBFS is max amplitude).
+const DEFAULT_QUIET_AUDIO_MIN_DURATION_SECS: f32 = 0.15;
+const DEFAULT_QUIET_AUDIO_RMS_DBFS_THRESHOLD: f32 = -50.0;
+const DEFAULT_QUIET_AUDIO_PEAK_DBFS_THRESHOLD: f32 = -40.0;
+
+fn amp_to_dbfs(amp: f32) -> f32 {
+    if !amp.is_finite() || amp <= 0.0 {
+        f32::NEG_INFINITY
+    } else {
+        20.0 * amp.log10()
+    }
+}
+
+fn is_effectively_quiet(
+    stats: AudioLevelStats,
+    min_duration_secs: f32,
+    rms_dbfs_threshold: f32,
+    peak_dbfs_threshold: f32,
+) -> bool {
+    // Very short recordings are usually accidental taps; treat as quiet.
+    if stats.duration_secs < min_duration_secs {
+        return true;
+    }
+
+    let rms_dbfs = amp_to_dbfs(stats.rms);
+    let peak_dbfs = amp_to_dbfs(stats.peak);
+
+    rms_dbfs < rms_dbfs_threshold && peak_dbfs < peak_dbfs_threshold
+}
 
 /// Errors that can occur in the recording pipeline
 #[derive(Debug, thiserror::Error)]
@@ -231,6 +263,15 @@ pub struct PipelineConfig {
     pub transcription_timeout: Duration,
     /// Maximum recording size in bytes (0 = no limit beyond default)
     pub max_recording_bytes: usize,
+
+    /// Enable a quiet-audio gate to avoid silent-audio hallucinations.
+    pub quiet_audio_gate_enabled: bool,
+    /// Treat recordings shorter than this as effectively quiet.
+    pub quiet_audio_min_duration_secs: f32,
+    /// RMS threshold (in dBFS) below which the audio is considered quiet.
+    pub quiet_audio_rms_dbfs_threshold: f32,
+    /// Peak threshold (in dBFS) below which the audio is considered quiet.
+    pub quiet_audio_peak_dbfs_threshold: f32,
     /// LLM formatting configuration
     pub llm_config: LlmConfig,
     /// API keys for all configured LLM providers (provider id -> key)
@@ -252,6 +293,12 @@ impl Default for PipelineConfig {
             vad_config: VadAutoStopConfig::default(),
             transcription_timeout: DEFAULT_TRANSCRIPTION_TIMEOUT,
             max_recording_bytes: MAX_WAV_SIZE_BYTES,
+
+            quiet_audio_gate_enabled: true,
+            quiet_audio_min_duration_secs: DEFAULT_QUIET_AUDIO_MIN_DURATION_SECS,
+            quiet_audio_rms_dbfs_threshold: DEFAULT_QUIET_AUDIO_RMS_DBFS_THRESHOLD,
+            quiet_audio_peak_dbfs_threshold: DEFAULT_QUIET_AUDIO_PEAK_DBFS_THRESHOLD,
+
             llm_config: LlmConfig::default(),
             llm_api_keys: HashMap::new(),
             #[cfg(feature = "local-whisper")]
@@ -580,13 +627,40 @@ impl SharedPipeline {
                 return Err(PipelineError::NotRecording);
             }
 
-            let wav_bytes = match inner.audio_capture.stop_and_get_wav() {
-                Ok(bytes) => bytes,
+            let (wav_bytes, stats) = match inner.audio_capture.stop_and_get_wav_with_stats() {
+                Ok(out) => out,
                 Err(e) => {
                     inner.set_error(&format!("Failed to stop recording: {}", e));
                     return Err(PipelineError::AudioCapture(e));
                 }
             };
+
+            if inner.config.quiet_audio_gate_enabled
+                && is_effectively_quiet(
+                    stats,
+                    inner.config.quiet_audio_min_duration_secs,
+                    inner.config.quiet_audio_rms_dbfs_threshold,
+                    inner.config.quiet_audio_peak_dbfs_threshold,
+                )
+            {
+                log::info!(
+                    "Pipeline: Skipping STT because recording is quiet (duration {:.2}s, rms {:.1} dBFS, peak {:.1} dBFS)",
+                    stats.duration_secs,
+                    amp_to_dbfs(stats.rms),
+                    amp_to_dbfs(stats.peak)
+                );
+
+                inner.reset_to_idle();
+                return Ok(TranscriptionResult {
+                    stt_text: String::new(),
+                    final_text: String::new(),
+                    stt_duration_ms: 0,
+                    llm_duration_ms: None,
+                    llm_provider_used: None,
+                    llm_model_used: None,
+                    llm_outcome: LlmOutcome::NotAttempted,
+                });
+            }
 
             // Check size limit
             let max_bytes = inner.config.max_recording_bytes;

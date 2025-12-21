@@ -889,7 +889,10 @@ function RecordingControl() {
               )}
             </div>
             <div className="overlay-meta">
-              <div className="overlay-pill" data-variant={isRecording ? "rec" : "dim"}>
+              <div
+                className="overlay-pill"
+                data-variant={isRecording ? "rec" : "dim"}
+              >
                 REC
               </div>
             </div>
