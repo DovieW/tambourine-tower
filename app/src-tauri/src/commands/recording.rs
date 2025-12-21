@@ -5,7 +5,9 @@
 
 use crate::audio_capture::VadAutoStopConfig;
 use crate::pipeline::{LlmOutcome, PipelineConfig, PipelineError, PipelineState, SharedPipeline};
+use crate::recordings::RecordingStore;
 use crate::request_log::RequestLogStore;
+use crate::history::HistoryStorage;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -94,6 +96,19 @@ pub async fn pipeline_stop_and_transcribe(
     app: AppHandle,
     pipeline: State<'_, SharedPipeline>,
 ) -> Result<String, CommandError> {
+    // Try to capture the active request id for history + persistent audio.
+    let active_request_id: Option<String> = app
+        .try_state::<RequestLogStore>()
+        .and_then(|store| store.with_current(|log| log.id.clone()));
+
+    // Create an in-progress history entry so the History view shows a running request.
+    if let Some(req_id) = active_request_id.as_deref() {
+        if let Some(history) = app.try_state::<HistoryStorage>() {
+            let _ = history.add_request_entry(req_id.to_string());
+            let _ = app.emit("history-changed", ());
+        }
+    }
+
     // Emit transcription started event
     let _ = app.emit("pipeline-transcription-started", ());
 
@@ -115,6 +130,32 @@ pub async fn pipeline_stop_and_transcribe(
                 });
                 log_store.complete_current();
             }
+
+            // Update history entry with error (keep it visible for retry)
+            if let Some(req_id) = active_request_id.as_deref() {
+                if let Some(history) = app.try_state::<HistoryStorage>() {
+                    let _ = history.complete_request_error(req_id, e.to_string());
+                    let _ = app.emit("history-changed", ());
+                }
+            }
+
+            // Persist audio for retry (best-effort)
+            if let (Some(req_id), Some(store)) = (
+                active_request_id.as_deref(),
+                app.try_state::<RecordingStore>(),
+            ) {
+                if let Some(wav) = pipeline.clone_last_wav_bytes() {
+                    let _ = store.save_wav(req_id, &wav);
+                }
+            }
+
+            // Emit pipeline-error event with request_id so the overlay can show a retry button.
+            let payload = serde_json::json!({
+                "message": e.to_string(),
+                "request_id": active_request_id.clone(),
+            });
+            let _ = app.emit("pipeline-error", payload);
+
             CommandError::from(e)
         })?;
 
@@ -178,6 +219,132 @@ pub async fn pipeline_stop_and_transcribe(
             log.complete_success();
         });
         log_store.complete_current();
+    }
+
+    // Persist audio for retry (best-effort)
+    if let (Some(req_id), Some(store)) = (
+        active_request_id.as_deref(),
+        app.try_state::<RecordingStore>(),
+    ) {
+        if let Some(wav) = pipeline.clone_last_wav_bytes() {
+            let _ = store.save_wav(req_id, &wav);
+        }
+    }
+
+    // Update history entry with success text
+    if let Some(req_id) = active_request_id.as_deref() {
+        if let Some(history) = app.try_state::<HistoryStorage>() {
+            let _ = history.complete_request_success(req_id, final_text.clone());
+            let _ = app.emit("history-changed", ());
+        }
+    }
+
+    // Emit transcript ready event
+    let _ = app.emit("pipeline-transcript-ready", &final_text);
+
+    Ok(final_text)
+}
+
+/// Retry transcription for a prior request id.
+///
+/// Loads the saved WAV (if available), creates a new request log + history entry,
+/// and re-runs STT + optional LLM formatting.
+#[tauri::command]
+pub async fn pipeline_retry_transcription(
+    app: AppHandle,
+    pipeline: State<'_, SharedPipeline>,
+    request_id: String,
+) -> Result<String, CommandError> {
+    let recording_store = app
+        .try_state::<RecordingStore>()
+        .ok_or_else(|| CommandError::from("Recording store not available".to_string()))?;
+
+    let wav = recording_store
+        .load_wav(&request_id)
+        .map_err(CommandError::from)?;
+
+    // Start a *new* request log for the retry attempt.
+    let new_request_id: Option<String> = app.try_state::<RequestLogStore>().map(|log_store| {
+        let config = pipeline.config();
+        log_store.start_request(config.stt_provider.clone(), config.stt_model.clone())
+    });
+
+    // Create a history entry for the retry attempt.
+    if let Some(req_id) = new_request_id.as_deref() {
+        if let Some(history) = app.try_state::<HistoryStorage>() {
+            let _ = history.add_request_entry(req_id.to_string());
+            let _ = app.emit("history-changed", ());
+        }
+    }
+
+    let _ = app.emit("pipeline-transcription-started", ());
+
+    // Run the retry transcription (STT + optional LLM)
+    let result = pipeline
+        .transcribe_wav_bytes_detailed(wav.clone())
+        .await
+        .map_err(|e| {
+            if let Some(log_store) = app.try_state::<RequestLogStore>() {
+                log_store.with_current(|log| {
+                    log.error(format!("Retry transcription failed: {}", e));
+                    log.complete_error(e.to_string());
+                });
+                log_store.complete_current();
+            }
+
+            if let Some(req_id) = new_request_id.as_deref() {
+                if let Some(history) = app.try_state::<HistoryStorage>() {
+                    let _ = history.complete_request_error(req_id, e.to_string());
+                    let _ = app.emit("history-changed", ());
+                }
+            }
+
+            // Also emit pipeline-error so the overlay can present the always-on-top retry UI.
+            let payload = serde_json::json!({
+                "message": e.to_string(),
+                "request_id": new_request_id,
+            });
+            let _ = app.emit("pipeline-error", payload);
+
+            CommandError::from(e)
+        })?;
+
+    // Persist audio under the *new* request id (best-effort)
+    if let Some(req_id) = new_request_id.as_deref() {
+        let _ = recording_store.save_wav(req_id, &wav);
+    }
+
+    let final_text = result.final_text.clone();
+
+    // Update log store on success
+    if let Some(log_store) = app.try_state::<RequestLogStore>() {
+        log_store.with_current(|log| {
+            log.raw_transcript = Some(result.stt_text.clone());
+            log.formatted_transcript = Some(result.final_text.clone());
+            log.stt_duration_ms = Some(result.stt_duration_ms);
+            log.llm_duration_ms = result.llm_duration_ms;
+
+            if result.llm_attempted() {
+                log.llm_provider = result.llm_provider_used.clone();
+                log.llm_model = result.llm_model_used.clone();
+            }
+
+            log.info(format!(
+                "Retry STT completed in {}ms ({} chars)",
+                result.stt_duration_ms,
+                result.stt_text.len()
+            ));
+            log.complete_success();
+        });
+        log_store.complete_current();
+    }
+
+    // Update history on success
+    if let Some(req_id) = new_request_id.as_deref() {
+        if let Some(history) = app.try_state::<HistoryStorage>() {
+            let _ = history.complete_request_success(req_id, final_text.clone());
+            let _ = app.emit("history-changed", ());
+        }
     }
 
     // Emit transcript ready event

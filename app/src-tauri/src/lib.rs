@@ -13,6 +13,7 @@ mod commands;
 mod history;
 mod llm;
 mod pipeline;
+mod recordings;
 mod request_log;
 mod settings;
 mod state;
@@ -25,6 +26,7 @@ mod tests;
 
 use audio_mute::AudioMuteManager;
 use history::HistoryStorage;
+use recordings::RecordingStore;
 use request_log::RequestLogStore;
 use settings::HotkeyConfig;
 use state::AppState;
@@ -351,7 +353,11 @@ fn start_recording(
             log::error!("{}: Failed to start pipeline recording: {} (state was: {:?})", source, e, current_state);
             let error_msg = format!("{} (pipeline state: {:?})", e, current_state);
             emit_system_event(app, "error", &format!("{}: Failed to start recording", source), Some(&error_msg));
-            let _ = app.emit("pipeline-error", error_msg);
+            let payload = serde_json::json!({
+                "message": error_msg,
+                "request_id": null,
+            });
+            let _ = app.emit("pipeline-error", payload);
             return;
         }
 
@@ -473,8 +479,22 @@ fn stop_recording(
         let pipeline_clone = (*pipeline).clone();
         let app_clone = app.clone();
         let overlay_mode_clone = overlay_mode.clone();
+
+        // Capture current request id (for history + retry audio).
+        let request_id: Option<String> = app
+            .try_state::<RequestLogStore>()
+            .and_then(|store| store.with_current(|log| log.id.clone()));
+
         tauri::async_runtime::spawn(async move {
             let _ = app_clone.emit("pipeline-transcription-started", ());
+
+            // Create an in-progress history entry while we transcribe.
+            if let Some(ref req_id) = request_id {
+                if let Some(history) = app_clone.try_state::<HistoryStorage>() {
+                    let _ = history.add_request_entry(req_id.clone());
+                    let _ = app_clone.emit("history-changed", ());
+                }
+            }
 
             // Log transcription start for this request
             if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
@@ -554,6 +574,16 @@ fn stop_recording(
                         log_store.complete_current();
                     }
 
+                    // Persist audio for retry (best-effort)
+                    if let (Some(ref req_id), Some(store)) = (
+                        request_id.as_ref(),
+                        app_clone.try_state::<RecordingStore>(),
+                    ) {
+                        if let Some(wav) = pipeline_clone.clone_last_wav_bytes() {
+                            let _ = store.save_wav(req_id, &wav);
+                        }
+                    }
+
                     if let Some(ref text) = filtered_transcript {
                         let _ = app_clone.emit("pipeline-transcript-ready", text);
 
@@ -569,15 +599,26 @@ fn stop_recording(
                         }
 
                         // Save to history
-                        if let Some(history) = app_clone.try_state::<HistoryStorage>() {
-                            if let Err(e) = history.add_entry(text.clone()) {
-                                log::warn!("Failed to save to history: {}", e);
+                        if let Some(ref req_id) = request_id {
+                            if let Some(history) = app_clone.try_state::<HistoryStorage>() {
+                                if let Err(e) = history.complete_request_success(req_id, text.clone()) {
+                                    log::warn!("Failed to update history: {}", e);
+                                }
+                                let _ = app_clone.emit("history-changed", ());
                             }
                         }
                     } else {
                         // Emit empty transcript event so UI can update appropriately
                         let _ = app_clone.emit("pipeline-transcript-ready", "");
                         log::info!("No transcript output (empty/whitespace), not outputting");
+
+                        // Mark history entry as success with empty text (keeps timeline consistent)
+                        if let Some(ref req_id) = request_id {
+                            if let Some(history) = app_clone.try_state::<HistoryStorage>() {
+                                let _ = history.complete_request_success(req_id, String::new());
+                                let _ = app_clone.emit("history-changed", ());
+                            }
+                        }
                     }
 
                     // Hide overlay after transcription completes if in "recording_only" mode.
@@ -602,7 +643,11 @@ fn stop_recording(
                 }
                 Err(e) => {
                     log::error!("Transcription failed: {}", e);
-                    let _ = app_clone.emit("pipeline-error", e.to_string());
+                    let payload = serde_json::json!({
+                        "message": e.to_string(),
+                        "request_id": request_id.clone(),
+                    });
+                    let _ = app_clone.emit("pipeline-error", payload);
 
                     if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
                         log_store.with_current(|log| {
@@ -612,24 +657,29 @@ fn stop_recording(
                         log_store.complete_current();
                     }
 
-                    // Hide overlay even on error if in "recording_only" mode.
-                    // Request a hide so the frontend can animate out.
-                    if overlay_mode_clone == "recording_only" {
-                        let _ = app_clone.emit("overlay-hide-requested", ());
-
-                        // Fallback hide.
-                        if let Some(window) = app_clone.get_webview_window("overlay") {
-                            let window_clone = window.clone();
-                            let app_check = app_clone.clone();
-                            tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_millis(220)).await;
-                                let current_mode: String = get_setting_from_store(&app_check, "overlay_mode", "always".to_string());
-                                if current_mode == "recording_only" {
-                                    let _ = window_clone.hide();
-                                }
-                            });
+                    // Persist audio for retry (best-effort)
+                    if let (Some(ref req_id), Some(store)) = (
+                        request_id.as_ref(),
+                        app_clone.try_state::<RecordingStore>(),
+                    ) {
+                        if let Some(wav) = pipeline_clone.clone_last_wav_bytes() {
+                            let _ = store.save_wav(req_id, &wav);
                         }
                     }
+
+                    // Mark history entry as error and keep it
+                    if let Some(ref req_id) = request_id {
+                        if let Some(history) = app_clone.try_state::<HistoryStorage>() {
+                            let _ = history.complete_request_error(req_id, e.to_string());
+                            let _ = app_clone.emit("history-changed", ());
+                        }
+                    }
+
+                    // Force-show overlay for retry UI regardless of overlay_mode.
+                    if let Some(window) = app_clone.get_webview_window("overlay") {
+                        let _ = window.show();
+                    }
+
                 }
             }
         });
@@ -866,6 +916,7 @@ pub fn run() {
             commands::recording::pipeline_force_reset,
             commands::recording::pipeline_test_transcribe_last_audio,
             commands::recording::pipeline_has_last_audio,
+            commands::recording::pipeline_retry_transcription,
             // Config commands (replacing Python server)
             commands::config::get_default_sections,
             commands::config::get_available_providers,
@@ -908,6 +959,10 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("Failed to get app data directory");
+
+            // Initialize recording store (saved WAVs for retry)
+            let recording_store = RecordingStore::new(app_data_dir.clone());
+            app.manage(recording_store);
 
             let history_storage = HistoryStorage::new(app_data_dir);
             app.manage(history_storage);

@@ -5,12 +5,32 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use uuid::Uuid;
 
+/// Status of a transcription attempt in history.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryStatus {
+    InProgress,
+    Success,
+    Error,
+}
+
+impl Default for HistoryStatus {
+    fn default() -> Self {
+        // Existing history.json entries (pre-status) should be treated as success.
+        HistoryStatus::Success
+    }
+}
+
 /// A single dictation history entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id: String,
     pub timestamp: DateTime<Utc>,
     pub text: String,
+    #[serde(default)]
+    pub status: HistoryStatus,
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 impl HistoryEntry {
@@ -19,6 +39,18 @@ impl HistoryEntry {
             id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             text,
+            status: HistoryStatus::Success,
+            error_message: None,
+        }
+    }
+
+    pub fn new_request_in_progress(id: String) -> Self {
+        Self {
+            id,
+            timestamp: Utc::now(),
+            text: String::new(),
+            status: HistoryStatus::InProgress,
+            error_message: None,
         }
     }
 }
@@ -95,6 +127,77 @@ impl HistoryStorage {
         }
         self.save()?;
         Ok(entry)
+    }
+
+    /// Add a new in-progress request entry with a predetermined id.
+    ///
+    /// This is used to show a placeholder in the History view while a transcription
+    /// is running, and to keep a failed attempt visible with a retry button.
+    pub fn add_request_entry(&self, request_id: String) -> Result<HistoryEntry, String> {
+        let entry = HistoryEntry::new_request_in_progress(request_id);
+        {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|e| format!("Failed to write history: {}", e))?;
+
+            // Add to the beginning (newest first)
+            data.entries.insert(0, entry.clone());
+
+            // Limit to 500 entries
+            if data.entries.len() > 500 {
+                data.entries.truncate(500);
+            }
+        }
+        self.save()?;
+        Ok(entry)
+    }
+
+    /// Mark an existing request entry as successful and set the final text.
+    pub fn complete_request_success(&self, request_id: &str, text: String) -> Result<(), String> {
+        {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|e| format!("Failed to write history: {}", e))?;
+
+            if let Some(entry) = data.entries.iter_mut().find(|e| e.id == request_id) {
+                entry.text = text;
+                entry.status = HistoryStatus::Success;
+                entry.error_message = None;
+            } else {
+                // If we somehow missed creating an in-progress entry, fall back to inserting.
+                data.entries.insert(0, HistoryEntry::new_request_in_progress(request_id.to_string()));
+                if let Some(entry) = data.entries.iter_mut().find(|e| e.id == request_id) {
+                    entry.text = text;
+                    entry.status = HistoryStatus::Success;
+                    entry.error_message = None;
+                }
+            }
+        }
+        self.save()
+    }
+
+    /// Mark an existing request entry as failed with an error message.
+    pub fn complete_request_error(&self, request_id: &str, error_message: String) -> Result<(), String> {
+        {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|e| format!("Failed to write history: {}", e))?;
+
+            if let Some(entry) = data.entries.iter_mut().find(|e| e.id == request_id) {
+                entry.status = HistoryStatus::Error;
+                entry.error_message = Some(error_message);
+                // Keep text as-is (likely empty). We intentionally do not delete the entry.
+            } else {
+                let mut entry = HistoryEntry::new_request_in_progress(request_id.to_string());
+                entry.status = HistoryStatus::Error;
+                entry.error_message = Some(error_message);
+                data.entries.insert(0, entry);
+            }
+        }
+        self.save()
     }
 
     /// Get all history entries (newest first), optionally limited

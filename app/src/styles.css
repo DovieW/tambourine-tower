@@ -319,6 +319,7 @@ body {
 
 .history-text {
 	flex: 1;
+	min-width: 0;
 	font-size: 14px;
 	color: var(--text-primary);
 	line-height: 1.5;
@@ -327,6 +328,7 @@ body {
 .history-actions {
 	display: flex;
 	gap: 4px;
+	flex-shrink: 0;
 	opacity: 0;
 	transition: opacity 0.2s ease;
 }

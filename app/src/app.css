@@ -108,6 +108,22 @@ body {
 	height: 56px;
 }
 
+.overlay-pill--close {
+	padding: 4px 8px;
+	min-width: 22px;
+	text-align: center;
+	font-size: 14px;
+	line-height: 1;
+	letter-spacing: 0;
+	text-transform: none;
+	opacity: 0.9;
+}
+
+.overlay-pill--close:hover {
+	opacity: 1;
+	background: rgba(255, 255, 255, 0.08);
+}
+
 .overlay-button:hover {
 	background: rgba(20, 20, 20, 0.9);
 }

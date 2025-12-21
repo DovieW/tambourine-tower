@@ -31,20 +31,22 @@ export const HotkeyConfigSchema = z.object({
 });
 
 interface HistoryEntry {
-	id: string;
-	timestamp: string;
-	text: string;
+  id: string;
+  timestamp: string;
+  text: string;
+  status?: "in_progress" | "success" | "error";
+  error_message?: string | null;
 }
 
 export interface PromptSection {
-	enabled: boolean;
-	content: string | null;
+  enabled: boolean;
+  content: string | null;
 }
 
 export interface CleanupPromptSections {
-	main: PromptSection;
-	advanced: PromptSection;
-	dictionary: PromptSection;
+  main: PromptSection;
+  advanced: PromptSection;
+  dictionary: PromptSection;
 }
 
 // Per-profile prompt overrides: each section can be omitted/null to inherit from Default.
@@ -776,6 +778,13 @@ export const sttAPI = {
     }),
 
   hasLastAudio: () => invoke<boolean>("pipeline_has_last_audio"),
+
+  // Retry a previous request using its persisted audio.
+  // Returns the final text (STT + optional LLM), same as normal transcription.
+  retryTranscription: (params: { requestId: string }) =>
+    invoke<string>("pipeline_retry_transcription", {
+      requestId: params.requestId,
+    }),
 };
 
 // ============================================================================

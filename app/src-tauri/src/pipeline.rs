@@ -1099,6 +1099,291 @@ impl SharedPipeline {
         })
     }
 
+    /// Transcribe provided WAV bytes using the same STT + optional LLM logic as the main pipeline.
+    ///
+    /// This is used for retrying failed requests from persisted audio.
+    pub async fn transcribe_wav_bytes_detailed(
+        &self,
+        wav_bytes: Vec<u8>,
+    ) -> Result<TranscriptionResult, PipelineError> {
+        // Phase 1: Resolve providers/config under lock.
+        let (stt_provider, llm_provider, llm_prompts, llm_timeout, retry_config, timeout, cancel_token) = {
+            let mut inner = self.inner.lock().map_err(|e| PipelineError::Lock(e.to_string()))?;
+
+            // Guard: don't run a retry while actively recording.
+            if inner.state == PipelineState::Recording {
+                return Err(PipelineError::AlreadyRecording);
+            }
+            if inner.state == PipelineState::Transcribing {
+                return Err(PipelineError::Lock("Pipeline already transcribing".to_string()));
+            }
+
+            // Keep a copy for STT testing/debugging UI.
+            inner.last_wav_bytes = Some(wav_bytes.clone());
+
+            // Check size limit
+            let max_bytes = inner.config.max_recording_bytes;
+            if max_bytes > 0 && wav_bytes.len() > max_bytes {
+                inner.set_error(&format!("Recording too large: {} bytes", wav_bytes.len()));
+                return Err(PipelineError::RecordingTooLarge(wav_bytes.len(), max_bytes));
+            }
+
+            inner.state = PipelineState::Transcribing;
+
+            // Ensure we have a cancellation token for this attempt.
+            let cancel_token = CancellationToken::new();
+            inner.cancel_token = Some(cancel_token.clone());
+
+            let llm_config = inner.config.llm_config.clone();
+            let active_profile = select_profile_for_foreground_app(&llm_config);
+            let llm_prompts = active_profile
+                .as_ref()
+                .map(|p| p.prompts.clone())
+                .unwrap_or_else(|| llm_config.prompts.clone());
+
+            // Resolve effective STT settings (profile overrides -> global defaults, with safe fallback)
+            let desired_stt_provider = canonicalize_stt_provider_id(
+                active_profile
+                    .as_ref()
+                    .and_then(|p| p.stt_provider.as_deref())
+                    .unwrap_or(inner.config.stt_provider.as_str()),
+            );
+            let desired_stt_model = active_profile
+                .as_ref()
+                .and_then(|p| p.stt_model.clone())
+                .or_else(|| inner.config.stt_model.clone());
+            let desired_timeout = active_profile
+                .as_ref()
+                .and_then(|p| p.stt_timeout_seconds)
+                .map(|s| seconds_to_duration_or(s, inner.config.transcription_timeout))
+                .unwrap_or(inner.config.transcription_timeout);
+
+            let stt_provider = match inner.get_or_create_stt_provider(&desired_stt_provider, desired_stt_model.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    // If the profile specified an override provider, fall back to global provider.
+                    let global_provider = canonicalize_stt_provider_id(&inner.config.stt_provider);
+                    if global_provider != desired_stt_provider {
+                        log::warn!(
+                            "Pipeline: Profile STT provider '{}' unavailable ({}), falling back to '{}'",
+                            desired_stt_provider,
+                            e,
+                            global_provider
+                        );
+                        let global_model = inner.config.stt_model.clone();
+                        inner.get_or_create_stt_provider(&global_provider, global_model)
+                            .map_err(|err| {
+                                inner.set_error(&format!("No STT provider configured: {}", err));
+                                PipelineError::NoProvider
+                            })?
+                    } else {
+                        inner.set_error(&format!("No STT provider configured: {}", e));
+                        return Err(PipelineError::NoProvider);
+                    }
+                }
+            };
+
+            // Resolve effective LLM provider/model (profile overrides -> global defaults)
+            let llm_timeout = llm_config.timeout;
+            let effective_llm_enabled = active_profile
+                .as_ref()
+                .and_then(|p| p.rewrite_llm_enabled)
+                .unwrap_or(inner.config.llm_config.enabled);
+
+            let llm_provider = if effective_llm_enabled {
+                let desired_llm_provider = active_profile
+                    .as_ref()
+                    .and_then(|p| p.llm_provider.clone())
+                    .unwrap_or_else(|| llm_config.provider.clone());
+                let desired_llm_model = active_profile
+                    .as_ref()
+                    .and_then(|p| p.llm_model.clone())
+                    .or_else(|| llm_config.model.clone());
+
+                match inner.get_or_create_llm_provider(
+                    desired_llm_provider.as_str(),
+                    desired_llm_model.clone(),
+                    llm_timeout,
+                    llm_config.ollama_url.clone(),
+                ) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        // Fallback to global provider if profile requested a different one.
+                        if active_profile
+                            .as_ref()
+                            .and_then(|p| p.llm_provider.as_ref())
+                            .is_some()
+                            && desired_llm_provider != llm_config.provider
+                        {
+                            log::warn!(
+                                "Pipeline: Profile LLM provider '{}' unavailable ({}), falling back to '{}'",
+                                desired_llm_provider,
+                                e,
+                                llm_config.provider
+                            );
+                            inner
+                                .get_or_create_llm_provider(
+                                    llm_config.provider.as_str(),
+                                    llm_config.model.clone(),
+                                    llm_timeout,
+                                    llm_config.ollama_url.clone(),
+                                )
+                                .ok()
+                        } else {
+                            log::warn!("Pipeline: LLM disabled for this transcription ({})", e);
+                            None
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+
+            let retry_config = inner.config.retry_config.clone();
+
+            (
+                stt_provider,
+                llm_provider,
+                llm_prompts,
+                llm_timeout,
+                retry_config,
+                desired_timeout,
+                cancel_token,
+            )
+        };
+
+        log::info!(
+            "Pipeline: Starting retry transcription ({} bytes, timeout {:?})",
+            wav_bytes.len(),
+            timeout
+        );
+
+        // Phase 2: STT transcription
+        let format = AudioFormat::default();
+        let wav = Arc::new(wav_bytes);
+
+        let transcription_future = async {
+            with_retry(&retry_config, || {
+                let provider = stt_provider.clone();
+                let wav = wav.clone();
+                let format = format.clone();
+                async move { provider.transcribe(wav.as_slice(), &format).await }
+            })
+            .await
+        };
+
+        let stt_start = std::time::Instant::now();
+        let stt_result = tokio::select! {
+            biased;
+
+            _ = cancel_token.cancelled() => {
+                log::info!("Pipeline: Retry transcription cancelled");
+                Err(PipelineError::Cancelled)
+            }
+
+            _ = tokio::time::sleep(timeout) => {
+                log::warn!("Pipeline: Retry transcription timed out after {:?}", timeout);
+                Err(PipelineError::Timeout(timeout))
+            }
+
+            result = transcription_future => {
+                result.map_err(PipelineError::from)
+            }
+        };
+
+        let stt_text = match stt_result {
+            Ok(t) => normalize_stt_text(t),
+            Err(e) => {
+                let mut inner = self
+                    .inner
+                    .lock()
+                    .map_err(|err| PipelineError::Lock(err.to_string()))?;
+                if matches!(e, PipelineError::Cancelled) {
+                    inner.reset_to_idle();
+                } else {
+                    inner.set_error(&e.to_string());
+                }
+                return Err(e);
+            }
+        };
+
+        let stt_duration_ms = stt_start.elapsed().as_millis() as u64;
+        log::info!("Pipeline: Retry STT complete, {} chars", stt_text.len());
+
+        // Phase 3: Optional LLM formatting
+        let mut llm_duration_ms: Option<u64> = None;
+        let mut llm_outcome: LlmOutcome = LlmOutcome::NotAttempted;
+
+        let llm_provider_used: Option<String> = llm_provider.as_ref().map(|p| p.name().to_string());
+        let llm_model_used: Option<String> = llm_provider.as_ref().map(|p| p.model().to_string());
+
+        let final_text = if let Some(llm) = llm_provider {
+            log::info!("Pipeline: Applying LLM formatting (retry)");
+            llm_outcome = LlmOutcome::Succeeded;
+            let llm_start = std::time::Instant::now();
+
+            let llm_result = tokio::select! {
+                biased;
+
+                _ = cancel_token.cancelled() => {
+                    log::info!("Pipeline: Retry LLM formatting cancelled");
+                    Err(PipelineError::Cancelled)
+                }
+
+                _ = tokio::time::sleep(llm_timeout) => {
+                    log::warn!("Pipeline: Retry LLM formatting timed out, using raw transcript");
+                    llm_outcome = LlmOutcome::TimedOut;
+                    Ok(stt_text.clone())
+                }
+
+                result = format_text(llm.as_ref(), &stt_text, &llm_prompts) => {
+                    match result {
+                        Ok(formatted) => {
+                            log::info!("Pipeline: Retry LLM formatted {} -> {} chars", stt_text.len(), formatted.len());
+                            Ok(formatted)
+                        }
+                        Err(e) => {
+                            log::warn!("Pipeline: Retry LLM formatting failed ({}), using raw transcript", e);
+                            llm_outcome = LlmOutcome::Failed(e.to_string());
+                            Ok(stt_text.clone())
+                        }
+                    }
+                }
+            };
+
+            llm_duration_ms = Some(llm_start.elapsed().as_millis() as u64);
+
+            match llm_result {
+                Ok(text) => text,
+                Err(PipelineError::Cancelled) => {
+                    let mut inner = self.inner.lock().map_err(|e| PipelineError::Lock(e.to_string()))?;
+                    inner.reset_to_idle();
+                    return Err(PipelineError::Cancelled);
+                }
+                Err(_) => stt_text.clone(),
+            }
+        } else {
+            stt_text.clone()
+        };
+
+        // Phase 4: Reset to idle
+        {
+            let mut inner = self.inner.lock().map_err(|e| PipelineError::Lock(e.to_string()))?;
+            inner.reset_to_idle();
+            log::info!("Pipeline: Retry complete, {} chars output", final_text.len());
+        }
+
+        Ok(TranscriptionResult {
+            stt_text,
+            final_text,
+            stt_duration_ms,
+            llm_duration_ms,
+            llm_provider_used,
+            llm_model_used,
+            llm_outcome,
+        })
+    }
+
     /// Stop recording and transcribe the audio.
     ///
     /// Kept for backwards compatibility. Prefer `stop_and_transcribe_detailed`.
@@ -1135,6 +1420,11 @@ impl SharedPipeline {
             .lock()
             .map(|inner| inner.state == PipelineState::Recording)
             .unwrap_or(false)
+    }
+
+    /// Get a clone of the last captured WAV bytes, if present.
+    pub fn clone_last_wav_bytes(&self) -> Option<Vec<u8>> {
+        self.inner.lock().ok().and_then(|inner| inner.last_wav_bytes.clone())
     }
 
     /// Poll for VAD events (non-blocking)

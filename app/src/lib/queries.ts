@@ -542,3 +542,15 @@ export function useClearRequestLogs() {
 		},
 	});
 }
+
+// Retry a previous transcription attempt by request id (loads saved audio in backend).
+export function useRetryTranscription() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (requestId: string) => sttAPI.retryTranscription({ requestId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["history"] });
+      queryClient.invalidateQueries({ queryKey: ["requestLogs"] });
+    },
+  });
+}
