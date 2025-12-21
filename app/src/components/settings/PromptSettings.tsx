@@ -199,8 +199,11 @@ export function PromptSettings({
     "um hello there uh how are you"
   );
   const [rewriteTestOutput, setRewriteTestOutput] = useState<string>("");
-  const [rewriteTestMeta, setRewriteTestMeta] = useState<string>("");
   const [rewriteTestError, setRewriteTestError] = useState<string>("");
+  const [rewriteTestDurationMs, setRewriteTestDurationMs] = useState<
+    number | null
+  >(null);
+  const rewriteTestStartRef = useRef<number | null>(null);
 
   const [sttTestOutput, setSttTestOutput] = useState<string>("");
   const [sttTestError, setSttTestError] = useState<string>("");
@@ -1583,7 +1586,8 @@ export function PromptSettings({
                     onClick={() => {
                       setRewriteTestError("");
                       setRewriteTestOutput("");
-                      setRewriteTestMeta("");
+                      setRewriteTestDurationMs(null);
+                      rewriteTestStartRef.current = performance.now();
 
                       testLlmRewrite.mutate(
                         {
@@ -1592,14 +1596,23 @@ export function PromptSettings({
                         },
                         {
                           onSuccess: (res) => {
+                            const startedAt = rewriteTestStartRef.current;
+                            rewriteTestStartRef.current = null;
+                            if (typeof startedAt === "number") {
+                              setRewriteTestDurationMs(
+                                performance.now() - startedAt
+                              );
+                            }
                             setRewriteTestOutput(res.output);
-                            setRewriteTestMeta(
-                              `${res.provider_used}${
-                                res.model_used ? ` • ${res.model_used}` : ""
-                              }`
-                            );
                           },
                           onError: (err) => {
+                            const startedAt = rewriteTestStartRef.current;
+                            rewriteTestStartRef.current = null;
+                            if (typeof startedAt === "number") {
+                              setRewriteTestDurationMs(
+                                performance.now() - startedAt
+                              );
+                            }
                             setRewriteTestError(errorToMessage(err));
                           },
                         }
@@ -1609,11 +1622,13 @@ export function PromptSettings({
                     Test
                   </Button>
 
-                  {rewriteTestMeta ? (
-                    <Text size="sm" c="dimmed">
-                      {rewriteTestMeta}
-                    </Text>
-                  ) : null}
+                  <Text size="sm" c="dimmed">
+                    {testLlmRewrite.isPending
+                      ? "Duration: running…"
+                      : rewriteTestDurationMs === null
+                      ? "Duration: —"
+                      : `Duration: ${(rewriteTestDurationMs / 1000).toFixed(2)}s`}
+                  </Text>
                 </div>
 
                 {rewriteTestError ? (
