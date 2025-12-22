@@ -160,7 +160,10 @@ function AudioWave({
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const lastPointsRef = useRef<Float32Array | null>(null);
+  const drawPointsRef = useRef<Float32Array | null>(null);
   const smoothedPeakRef = useRef(0);
+  const noiseFloorRef = useRef(0);
+  const voiceEnergyRef = useRef(0);
 
   const cleanupAudio = useCallback(() => {
     if (animationRef.current) {
@@ -184,7 +187,10 @@ function AudioWave({
 
     analyserRef.current = null;
     lastPointsRef.current = null;
+    drawPointsRef.current = null;
     smoothedPeakRef.current = 0;
+    noiseFloorRef.current = 0;
+    voiceEnergyRef.current = 0;
   }, []);
 
   useEffect(() => {
@@ -233,7 +239,8 @@ function AudioWave({
         ctx.clearRect(0, 0, logicalW, logicalH);
 
         const midY = logicalH / 2;
-        const amp = logicalH * 0.1;
+        // Keep the idle animation subtle so it doesn't read as "picking up noise".
+        const amp = logicalH * 0.055;
         const phase = t / 650;
         for (let i = 0; i < points; i++) {
           const x = i / (points - 1);
@@ -339,18 +346,39 @@ function AudioWave({
         }
 
         const source = audioContext.createMediaStreamSource(stream);
+
+        // Filter out low-frequency rumble (bus/handling noise) and extreme highs,
+        // so the visualization is driven primarily by speech frequencies.
+        const highpass = audioContext.createBiquadFilter();
+        highpass.type = "highpass";
+        highpass.frequency.value = 180;
+        highpass.Q.value = 0.7;
+
+        const lowpass = audioContext.createBiquadFilter();
+        lowpass.type = "lowpass";
+        lowpass.frequency.value = 3800;
+        lowpass.Q.value = 0.7;
+
         const analyser = audioContext.createAnalyser();
         // Higher resolution + smoother motion.
         analyser.fftSize = 2048;
-        // Some smoothing keeps the line stable; we'll add responsiveness via our own gain.
-        analyser.smoothingTimeConstant = 0.75;
-        source.connect(analyser);
+        // Keep this relatively low; we do our own smoothing and want fast release.
+        analyser.smoothingTimeConstant = 0.55;
+
+        // Source -> filters -> analyser.
+        source.connect(highpass);
+        highpass.connect(lowpass);
+        lowpass.connect(analyser);
         analyserRef.current = analyser;
 
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
+
+        const analyserNode = analyser;
+        const timeData = new Uint8Array(analyserNode.fftSize);
+        const freqData = new Uint8Array(analyserNode.frequencyBinCount);
 
         const draw = () => {
           if (!analyserRef.current || !mounted) return;
@@ -373,17 +401,16 @@ function AudioWave({
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           ctx.clearRect(0, 0, logicalW, logicalH);
 
-          const analyserNode = analyserRef.current;
-          const bufferLength = analyserNode.fftSize;
-          const dataArray = new Uint8Array(bufferLength);
-          analyserNode.getByteTimeDomainData(dataArray);
+          // Time + frequency data from the filtered signal.
+          analyserNode.getByteTimeDomainData(timeData);
+          analyserNode.getByteFrequencyData(freqData);
 
-          // Downsample the waveform to a fixed number of points to keep it smooth.
-          const points = 96;
+          // Fewer points + smoothing yields a calmer, less "spiky" line.
+          const points = 64;
           const next = new Float32Array(points);
           for (let i = 0; i < points; i++) {
-            const idx = Math.floor((i / (points - 1)) * (bufferLength - 1));
-            const v = (dataArray[idx] ?? 128) - 128;
+            const idx = Math.floor((i / (points - 1)) * (timeData.length - 1));
+            const v = (timeData[idx] ?? 128) - 128;
             next[i] = v / 128;
           }
 
@@ -398,10 +425,72 @@ function AudioWave({
             sumSq += v * v;
           }
 
-          // Voice energy (0..1) based on RMS.
-          // Tuned to kick in earlier on quiet mics while the deadzone keeps silence calm.
-          const rms = Math.sqrt(sumSq / points);
-          const voiceEnergy = Math.min(1, Math.max(0, (rms - 0.008) / 0.06));
+          // Voice energy (0..1) based on *speech-band* frequency content.
+          // This rejects low-frequency rumble (bus/handling) much better than time-domain RMS.
+          const binHz = audioContext.sampleRate / analyserNode.fftSize;
+          const clampIdx = (i: number) =>
+            Math.min(analyserNode.frequencyBinCount - 1, Math.max(0, i));
+
+          const speechLo = clampIdx(Math.floor(300 / binHz));
+          const speechHi = clampIdx(Math.ceil(3400 / binHz));
+          const totalLo = clampIdx(Math.floor(60 / binHz));
+          const totalHi = clampIdx(Math.ceil(8000 / binHz));
+
+          let speechSum = 0;
+          let totalSum = 0;
+          let speechCount = 0;
+          let totalCount = 0;
+          for (let i = totalLo; i <= totalHi; i++) {
+            const v = (freqData[i] ?? 0) / 255;
+            const vv = v * v;
+            totalSum += vv;
+            totalCount++;
+            if (i >= speechLo && i <= speechHi) {
+              speechSum += vv;
+              speechCount++;
+            }
+          }
+
+          const totalRms =
+            totalCount > 0 ? Math.sqrt(totalSum / totalCount) : 0;
+          const speechRms =
+            speechCount > 0 ? Math.sqrt(speechSum / speechCount) : 0;
+          const speechRatio = totalRms > 1e-6 ? speechRms / totalRms : 0;
+
+          // Adaptive floor - only rises when speechRatio is LOW (noise-like)
+          // This prevents the floor from chasing continuous speech
+          const prevNoiseFloor = noiseFloorRef.current;
+          const isNoiseLike = speechRatio < 1.02; // Broadband = noise
+          const riseRate = isNoiseLike ? 0.08 : 0.002; // Rise only for noise
+          const fallRate = 0.01; // Very slow fall
+          const nfRate = speechRms > prevNoiseFloor ? riseRate : fallRate;
+          const noiseFloor =
+            prevNoiseFloor + (speechRms - prevNoiseFloor) * nfRate;
+          noiseFloorRef.current = noiseFloor;
+
+          // Voice detection: use speechRatio as a soft multiplier
+          // Bus noise tends to have speechRatio closer to 1.0 (broadband)
+          // Voice has speechRatio often > 1.0 (concentrated in speech band)
+          const aboveFloor = Math.max(0, speechRms - noiseFloor * 0.8);
+          // Soft voice likelihood: 0 when ratio<=1.0, ramps up smoothly above 1.0
+          const voiceLikelihood = Math.max(
+            0,
+            Math.min(1, (speechRatio - 1.0) * 8)
+          );
+          // Energy based on raw level, boosted by voice likelihood
+          const rawEnergy = Math.pow(Math.min(1, aboveFloor / 0.015), 0.6);
+          const voiceEnergyInstant = rawEnergy * (0.2 + voiceLikelihood * 0.8);
+
+          // Smooth voice energy so it doesn't flicker between syllables
+          // (which makes the waveform feel timid/twitchy).
+          const prevVE = voiceEnergyRef.current;
+          const attack = 0.55;
+          const decay = 0.12;
+          const ve =
+            voiceEnergyInstant > prevVE
+              ? prevVE * (1 - attack) + voiceEnergyInstant * attack
+              : prevVE * (1 - decay) + voiceEnergyInstant * decay;
+          voiceEnergyRef.current = ve;
 
           const prevPeak = smoothedPeakRef.current;
           // Relatively quick decay so gain relaxes when you stop speaking.
@@ -409,28 +498,21 @@ function AudioWave({
           smoothedPeakRef.current = Math.max(peak, decayed);
 
           // Floor prevents runaway gain on background noise.
-          const effectivePeak = Math.max(0.03, smoothedPeakRef.current);
-          const targetPeak = 0.85 + voiceEnergy * 0.3;
-          const maxGain = 9 + voiceEnergy * 6;
+          const effectivePeak = Math.max(0.02, smoothedPeakRef.current);
+          const targetPeak = 0.9 + ve * 0.8;
+          // Make voice visually pop hard.
+          const maxGain = 3.0 + ve * 50;
           const gain = Math.min(
             maxGain,
             Math.max(1, targetPeak / effectivePeak)
           );
 
-          // Post-gain deadzone + soft clipping:
-          // - deadzone calms near-silence
-          // - tanh keeps big peaks from slamming flat
-          const deadzone = Math.max(0.03, 0.065 - voiceEnergy * 0.03);
+          // Apply gain directly without voiceScale limiting
+          // Let the waveform grow to use more vertical space
           for (let i = 0; i < points; i++) {
             const v = (next[i] ?? 0) * gain;
-            const a = Math.abs(v);
-            if (a <= deadzone) {
-              next[i] = 0;
-              continue;
-            }
-            const s = v < 0 ? -1 : 1;
-            const gated = (a - deadzone) / (1 - deadzone);
-            next[i] = s * Math.tanh(gated * (1.1 + voiceEnergy * 0.4));
+            // Very light soft clip - allow values to grow larger before compressing
+            next[i] = Math.tanh(v * 0.5) * 2.0;
           }
 
           // Smooth between frames to avoid jitter.
@@ -438,15 +520,19 @@ function AudioWave({
           if (!prev || prev.length !== points) {
             lastPointsRef.current = next;
           } else {
+            // Higher responsiveness for more fluid constant motion
+            const responsiveness = 0.25;
+            const hold = 1 - responsiveness;
             for (let i = 0; i < points; i++) {
               const prevVal = prev[i] ?? 0;
               const nextVal = next[i] ?? 0;
-              prev[i] = prevVal * 0.72 + nextVal * 0.28;
+              prev[i] = prevVal * hold + nextVal * responsiveness;
             }
             lastPointsRef.current = prev;
           }
 
-          const wave = lastPointsRef.current ?? next;
+          // Use the temporally-smoothed wave directly (no spatial smoothing)
+          const drawWave = lastPointsRef.current ?? next;
 
           const applyEdgeTaper = (v: number, i: number, n: number) => {
             // Visually taper the waveform to a point at both ends.
@@ -461,13 +547,18 @@ function AudioWave({
           };
 
           const midY = logicalH / 2;
-          // Taller peaks when voice is present.
-          const amp = logicalH * (0.58 + voiceEnergy * 0.28);
+          // Amplitude now controlled by voiceScale above, keep base amp high
+          const maxAmp = Math.max(1, logicalH / 2 - 1);
+          const amp = maxAmp * 0.95;
+
+          // Plain white waveform
+          const colorMid = `rgba(255,255,255,0.92)`;
+          const colorEdge = `rgba(255,255,255,0.60)`;
 
           const grad = ctx.createLinearGradient(0, 0, logicalW, 0);
-          grad.addColorStop(0, "rgba(255,255,255,0.60)");
-          grad.addColorStop(0.5, "rgba(255,255,255,0.92)");
-          grad.addColorStop(1, "rgba(255,255,255,0.60)");
+          grad.addColorStop(0, colorEdge);
+          grad.addColorStop(0.5, colorMid);
+          grad.addColorStop(1, colorEdge);
 
           const drawPath = (lineWidth: number, alpha: number, blur: number) => {
             ctx.save();
@@ -486,7 +577,7 @@ function AudioWave({
             ctx.beginPath();
             for (let i = 0; i < points; i++) {
               const x = xPad + (i / (points - 1)) * xSpan;
-              const tapered = applyEdgeTaper(wave[i] ?? 0, i, points);
+              const tapered = applyEdgeTaper(drawWave[i] ?? 0, i, points);
               const y = midY + tapered * amp;
               if (i === 0) ctx.moveTo(x, y);
               else ctx.lineTo(x, y);
