@@ -41,6 +41,8 @@ const API_KEYS: ApiKeyConfig[] = [
   },
 ];
 
+export const API_KEY_STORE_KEYS = API_KEYS.map((k) => k.storeKey);
+
 function ApiKeyInput({ config }: { config: ApiKeyConfig }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState("");

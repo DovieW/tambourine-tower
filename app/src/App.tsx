@@ -8,6 +8,7 @@ import {
   Title,
   Tooltip,
 } from "@mantine/core";
+import { useQuery } from "@tanstack/react-query";
 import { Cog, FileText, Home, Plus, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import { HistoryFeed } from "./components/HistoryFeed";
@@ -21,6 +22,7 @@ import {
   ProfileConfigModal,
   UiSettings,
 } from "./components/settings";
+import { API_KEY_STORE_KEYS } from "./components/settings/ApiKeysSettings";
 import {
   DEFAULT_HOLD_HOTKEY,
   DEFAULT_PASTE_LAST_HOTKEY,
@@ -209,6 +211,30 @@ function SettingsView() {
   const [programsModalOpen, setProgramsModalOpen] = useState(false);
   const [autoCreateProfileOnOpen, setAutoCreateProfileOnOpen] = useState(false);
 
+  const { data: hasAnyApiKey } = useQuery({
+    queryKey: ["hasAnyApiKey"],
+    queryFn: async () => {
+      try {
+        const results = await Promise.all(
+          API_KEY_STORE_KEYS.map((key) => tauriAPI.hasApiKey(key)),
+        );
+        return results.some(Boolean);
+      } catch {
+        // If we can't determine key status, don't block users by forcing the API Keys tab.
+        return true;
+      }
+    },
+  });
+
+  const [activeSettingsTab, setActiveSettingsTab] = useState<string>("ai");
+  const [hasUserSelectedTab, setHasUserSelectedTab] = useState(false);
+
+  useEffect(() => {
+    if (hasUserSelectedTab) return;
+    if (hasAnyApiKey === undefined) return;
+    setActiveSettingsTab(hasAnyApiKey ? "ai" : "api-keys");
+  }, [hasAnyApiKey, hasUserSelectedTab]);
+
   useEffect(() => {
     // Consume the one-shot flag as soon as the modal is opened.
     if (programsModalOpen && autoCreateProfileOnOpen) {
@@ -340,23 +366,22 @@ function SettingsView() {
       />
 
       <Tabs
-        defaultValue="api-keys"
+        value={activeSettingsTab}
+        onChange={(value) => {
+          if (!value) return;
+          setHasUserSelectedTab(true);
+          setActiveSettingsTab(value);
+        }}
         classNames={{ root: "settings-tabs" }}
         keepMounted={false}
       >
         <Tabs.List>
-          <Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
           <Tabs.Tab value="ai">AI</Tabs.Tab>
           <Tabs.Tab value="ui">UI</Tabs.Tab>
           <Tabs.Tab value="audio">Audio</Tabs.Tab>
           <Tabs.Tab value="hotkeys">Hotkeys</Tabs.Tab>
+          <Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
         </Tabs.List>
-
-        <Tabs.Panel value="api-keys" pt="md">
-          <div className="settings-card">
-            <ApiKeysSettings editingProfileId={editingProfileId} />
-          </div>
-        </Tabs.Panel>
 
         <Tabs.Panel value="ai" pt="md">
           <div className="settings-card">
@@ -379,6 +404,12 @@ function SettingsView() {
         <Tabs.Panel value="hotkeys" pt="md">
           <div className="settings-card">
             <HotkeySettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="api-keys" pt="md">
+          <div className="settings-card">
+            <ApiKeysSettings editingProfileId={editingProfileId} />
           </div>
         </Tabs.Panel>
       </Tabs>
