@@ -111,6 +111,7 @@ fn ensure_default_settings(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     set_if_missing("overlay_mode", json!("always"));
     set_if_missing("widget_position", json!("bottom-right"));
     set_if_missing("output_mode", json!("paste"));
+    set_if_missing("output_hit_enter", json!(false));
     set_if_missing("playing_audio_handling", json!("mute"));
     set_if_missing("sound_enabled", json!(true));
     set_if_missing("rewrite_llm_enabled", json!(false));
@@ -484,6 +485,9 @@ fn stop_recording(
     let output_mode_str: String = get_setting_from_store(app, "output_mode", "paste".to_string());
     let output_mode = commands::text::OutputMode::from_str(&output_mode_str);
 
+    // Optional: after pasting, press Enter.
+    let output_hit_enter: bool = get_setting_from_store(app, "output_hit_enter", false);
+
     // Stop pipeline and trigger transcription in background
     if let Some(pipeline) = app.try_state::<pipeline::SharedPipeline>() {
         let pipeline_clone = (*pipeline).clone();
@@ -613,7 +617,7 @@ fn stop_recording(
                         let _ = app_clone.emit("pipeline-transcript-ready", text);
 
                         // Output the transcript based on mode
-                        if let Err(e) = commands::text::output_text_with_mode(text, output_mode) {
+                        if let Err(e) = commands::text::output_text_with_mode(text, output_mode, output_hit_enter) {
                             log::error!("Failed to output transcript: {}", e);
 
                             if let Some(log_store) = app_clone.try_state::<RequestLogStore>() {
@@ -1069,11 +1073,13 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
                     let output_mode_str: String = get_setting_from_store(app, "output_mode", "paste".to_string());
                     let output_mode = commands::text::OutputMode::from_str(&output_mode_str);
 
+                    let output_hit_enter: bool = get_setting_from_store(app, "output_hit_enter", false);
+
                     let history_storage = app.state::<HistoryStorage>();
 
                     if let Ok(entries) = history_storage.get_all(Some(1)) {
                         if let Some(entry) = entries.first() {
-                            if let Err(e) = commands::text::output_text_with_mode(&entry.text, output_mode) {
+                            if let Err(e) = commands::text::output_text_with_mode(&entry.text, output_mode, output_hit_enter) {
                                 log::error!("Failed to output last transcription: {}", e);
                             }
                         } else {

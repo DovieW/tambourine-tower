@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   useIsAudioMuteSupported,
   useSettings,
+  useUpdateOutputHitEnter,
   useUpdateOutputMode,
   useUpdateOverlayMode,
   useUpdatePlayingAudioHandling,
@@ -51,11 +52,29 @@ const WIDGET_POSITION_OPTIONS = [
   { value: "bottom-right", label: "Bottom Right" },
 ];
 
-const OUTPUT_MODE_OPTIONS = [
-  { value: "paste", label: "Paste" },
-  { value: "paste_and_clipboard", label: "Paste and clipboard" },
-  { value: "clipboard", label: "Clipboard" },
-];
+function outputModeToFlags(mode: OutputMode): {
+  paste: boolean;
+  clipboard: boolean;
+} {
+  switch (mode) {
+    case "paste":
+      return { paste: true, clipboard: false };
+    case "paste_and_clipboard":
+      return { paste: true, clipboard: true };
+    case "clipboard":
+      return { paste: false, clipboard: true };
+    default:
+      return { paste: true, clipboard: false };
+  }
+}
+
+function flagsToOutputMode(paste: boolean, clipboard: boolean): OutputMode {
+  if (paste && clipboard) return "paste_and_clipboard";
+  if (paste) return "paste";
+  if (clipboard) return "clipboard";
+  // Should be unreachable because we enforce at least one.
+  return "paste";
+}
 
 const PLAYING_AUDIO_HANDLING_OPTIONS: Array<{
   value: PlayingAudioHandling;
@@ -88,6 +107,7 @@ export function UiSettings({
   const updateOverlayMode = useUpdateOverlayMode();
   const updateWidgetPosition = useUpdateWidgetPosition();
   const updateOutputMode = useUpdateOutputMode();
+  const updateOutputHitEnter = useUpdateOutputHitEnter();
   const updateRewriteProgramPromptProfiles =
     useUpdateRewriteProgramPromptProfiles();
 
@@ -161,6 +181,15 @@ export function UiSettings({
   const outputModeInheriting =
     isProfileScope && isInheriting(profile?.output_mode);
 
+  const globalOutputHitEnter = settings?.output_hit_enter ?? false;
+  const outputHitEnter = isProfileScope
+    ? getProfileValue(profile?.output_hit_enter, globalOutputHitEnter)
+    : globalOutputHitEnter;
+  const outputHitEnterInheriting =
+    isProfileScope && isInheriting(profile?.output_hit_enter);
+
+  const outputFlags = outputModeToFlags(outputMode);
+
   // Handlers - update profile or global depending on scope
   const handleSoundToggle = (checked: boolean) => {
     if (isProfileScope) {
@@ -204,13 +233,60 @@ export function UiSettings({
     await invoke("set_widget_position", { position: widgetPosition });
   };
 
-  const handleOutputModeChange = (value: string | null) => {
-    if (!value) return;
+  const handleOutputHitEnterToggle = (checked: boolean) => {
     if (isProfileScope) {
-      updateProfile({ output_mode: value as OutputMode });
+      updateProfile({ output_hit_enter: checked });
       return;
     }
-    updateOutputMode.mutate(value as OutputMode);
+    updateOutputHitEnter.mutate(checked);
+  };
+
+  const handleOutputPasteToggle = (checked: boolean) => {
+    // Enforce at least one action selected.
+    let nextPaste = checked;
+    let nextClipboard = outputFlags.clipboard;
+
+    if (!nextPaste && !nextClipboard) {
+      nextClipboard = true;
+    }
+
+    const nextMode = flagsToOutputMode(nextPaste, nextClipboard);
+
+    // If paste is being disabled, hit-enter becomes invalid; clear it.
+    if (!nextPaste && outputHitEnter) {
+      handleOutputHitEnterToggle(false);
+    }
+
+    // Avoid no-op writes
+    if (nextMode === outputMode) return;
+    if (isProfileScope) {
+      updateProfile({ output_mode: nextMode });
+      return;
+    }
+    updateOutputMode.mutate(nextMode);
+  };
+
+  const handleOutputClipboardToggle = (checked: boolean) => {
+    // Enforce at least one action selected.
+    let nextClipboard = checked;
+    let nextPaste = outputFlags.paste;
+
+    if (!nextClipboard && !nextPaste) {
+      nextPaste = true;
+    }
+
+    const nextMode = flagsToOutputMode(nextPaste, nextClipboard);
+
+    if (!nextPaste && outputHitEnter) {
+      handleOutputHitEnterToggle(false);
+    }
+
+    if (nextMode === outputMode) return;
+    if (isProfileScope) {
+      updateProfile({ output_mode: nextMode });
+      return;
+    }
+    updateOutputMode.mutate(nextMode);
   };
 
   return (
@@ -476,44 +552,71 @@ export function UiSettings({
           <p className="settings-description">How to output transcribed text</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {isProfileScope && !outputModeInheriting && (
-            <Tooltip label="Disable override (inherit from Default)" withArrow>
-              <ActionIcon
-                variant="subtle"
-                color="gray"
-                size="sm"
-                disabled={isLoading}
-                onClick={() =>
-                  openDisableOverrideDialog({
-                    title: "Disable Output mode override?",
-                    onConfirm: () => updateProfile({ output_mode: null }),
-                  })
-                }
+          {isProfileScope &&
+            !(outputModeInheriting && outputHitEnterInheriting) && (
+              <Tooltip
+                label="Disable override (inherit from Default)"
+                withArrow
               >
-                <RotateCcw size={14} style={{ opacity: 0.65 }} />
-              </ActionIcon>
-            </Tooltip>
-          )}
-          {outputModeInheriting && (
-            <Tooltip label={INHERIT_TOOLTIP} withArrow>
-              <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
-            </Tooltip>
-          )}
-          <Select
-            data={OUTPUT_MODE_OPTIONS}
-            value={outputMode}
-            onChange={handleOutputModeChange}
-            disabled={isLoading}
-            withCheckIcon={false}
-            styles={{
-              input: {
-                backgroundColor: "var(--bg-elevated)",
-                borderColor: "var(--border-default)",
-                color: "var(--text-primary)",
-                minWidth: 180,
-              },
-            }}
-          />
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="sm"
+                  disabled={isLoading}
+                  onClick={() =>
+                    openDisableOverrideDialog({
+                      title: "Disable Output mode override?",
+                      onConfirm: () =>
+                        updateProfile({
+                          output_mode: null,
+                          output_hit_enter: null,
+                        }),
+                    })
+                  }
+                >
+                  <RotateCcw size={14} style={{ opacity: 0.65 }} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+          {isProfileScope &&
+            outputModeInheriting &&
+            outputHitEnterInheriting && (
+              <Tooltip label={INHERIT_TOOLTIP} withArrow>
+                <Info size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+              </Tooltip>
+            )}
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <Switch
+              label="Paste"
+              checked={outputFlags.paste}
+              onChange={(event) =>
+                handleOutputPasteToggle(event.currentTarget.checked)
+              }
+              disabled={isLoading}
+              color="gray"
+              size="md"
+            />
+            <Switch
+              label="Clipboard"
+              checked={outputFlags.clipboard}
+              onChange={(event) =>
+                handleOutputClipboardToggle(event.currentTarget.checked)
+              }
+              disabled={isLoading}
+              color="gray"
+              size="md"
+            />
+            <Switch
+              label="Hit Enter"
+              checked={outputHitEnter}
+              onChange={(event) =>
+                handleOutputHitEnterToggle(event.currentTarget.checked)
+              }
+              disabled={isLoading || !outputFlags.paste}
+              color="gray"
+              size="md"
+            />
+          </div>
         </div>
       </div>
     </>

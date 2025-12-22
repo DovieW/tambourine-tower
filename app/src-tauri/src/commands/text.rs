@@ -27,6 +27,21 @@ fn output_injection_lock() -> &'static Mutex<()> {
     OUTPUT_INJECTION_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn maybe_hit_enter(enigo: &mut Enigo, hit_enter: bool) -> Result<(), String> {
+    if !hit_enter {
+        return Ok(());
+    }
+
+    // Small delay to avoid racing the paste keystroke.
+    thread::sleep(Duration::from_millis(KEY_EVENT_DELAY_MS));
+
+    enigo
+        .key(Key::Return, Direction::Click)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Output mode for transcribed text
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum OutputMode {
@@ -77,7 +92,7 @@ pub async fn type_text(app: AppHandle, text: String) -> Result<(), String> {
             }
         };
 
-        let result = type_text_blocking(&text);
+        let result = type_text_blocking(&text, false);
         let _ = tx.send(result);
     })
     .map_err(|e| e.to_string())?;
@@ -87,20 +102,20 @@ pub async fn type_text(app: AppHandle, text: String) -> Result<(), String> {
 }
 
 /// Output text based on the specified mode
-pub fn output_text_with_mode(text: &str, mode: OutputMode) -> Result<(), String> {
+pub fn output_text_with_mode(text: &str, mode: OutputMode, hit_enter: bool) -> Result<(), String> {
     let _guard = output_injection_lock()
         .lock()
         .map_err(|_| "Output lock poisoned".to_string())?;
 
     match mode {
-        OutputMode::Paste => type_text_blocking(text),
-        OutputMode::PasteAndClipboard => paste_and_keep_clipboard(text),
+        OutputMode::Paste => type_text_blocking(text, hit_enter),
+        OutputMode::PasteAndClipboard => paste_and_keep_clipboard(text, hit_enter),
         OutputMode::Clipboard => copy_to_clipboard(text),
     }
 }
 
 /// Copy text to clipboard and paste, keeping text in clipboard (no restore)
-pub fn paste_and_keep_clipboard(text: &str) -> Result<(), String> {
+pub fn paste_and_keep_clipboard(text: &str, hit_enter: bool) -> Result<(), String> {
     let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
 
     // Set new text
@@ -129,6 +144,8 @@ pub fn paste_and_keep_clipboard(text: &str) -> Result<(), String> {
         .key(modifier, Direction::Release)
         .map_err(|e| e.to_string())?;
 
+    maybe_hit_enter(&mut enigo, hit_enter)?;
+
     // Don't restore clipboard - keep the text there
     log::info!("Pasted {} chars (kept in clipboard)", text.len());
     Ok(())
@@ -150,7 +167,7 @@ pub fn type_as_keystrokes(_text: &str) -> Result<(), String> {
 }
 
 /// Type text using clipboard and paste. Used internally by shortcut handlers.
-pub fn type_text_blocking(text: &str) -> Result<(), String> {
+pub fn type_text_blocking(text: &str, hit_enter: bool) -> Result<(), String> {
     let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
 
     // Save previous clipboard content
@@ -181,6 +198,8 @@ pub fn type_text_blocking(text: &str) -> Result<(), String> {
     enigo
         .key(modifier, Direction::Release)
         .map_err(|e| e.to_string())?;
+
+    maybe_hit_enter(&mut enigo, hit_enter)?;
 
     // Restore previous clipboard after a delay
     thread::sleep(Duration::from_millis(CLIPBOARD_RESTORE_DELAY_MS));

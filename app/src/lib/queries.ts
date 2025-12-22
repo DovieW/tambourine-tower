@@ -227,6 +227,16 @@ export function useUpdateOutputMode() {
   });
 }
 
+export function useUpdateOutputHitEnter() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => tauriAPI.updateOutputHitEnter(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
 export function useUpdateQuietAudioGateEnabled() {
   const queryClient = useQueryClient();
   return useMutation({

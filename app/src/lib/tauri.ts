@@ -84,6 +84,10 @@ export interface RewriteProgramPromptProfile {
   overlay_mode?: OverlayMode | null;
   widget_position?: WidgetPosition | null;
   output_mode?: OutputMode | null;
+
+  // After paste, optionally press Enter.
+  // (May be ignored by backend until runtime/profile routing supports it.)
+  output_hit_enter?: boolean | null;
 }
 
 export type PlayingAudioHandling = "none" | "mute" | "pause" | "mute_and_pause";
@@ -138,6 +142,7 @@ export interface AppSettings {
   overlay_mode: OverlayMode;
   widget_position: WidgetPosition;
   output_mode: OutputMode;
+  output_hit_enter: boolean;
 
   // Hallucination protection (quiet-audio gate)
   quiet_audio_gate_enabled: boolean;
@@ -411,6 +416,11 @@ export const tauriAPI = {
           ? normalizeOutputMode((p as any).output_mode)
           : null;
 
+      const output_hit_enter =
+        typeof (p as any).output_hit_enter === "boolean"
+          ? (p as any).output_hit_enter
+          : null;
+
       if (!id) return null;
 
       return {
@@ -429,6 +439,7 @@ export const tauriAPI = {
         overlay_mode,
         widget_position,
         output_mode,
+        output_hit_enter,
       };
     };
 
@@ -479,6 +490,7 @@ export const tauriAPI = {
       widget_position:
         (await store.get<WidgetPosition>("widget_position")) ?? "bottom-center",
       output_mode: normalizeOutputMode(await store.get("output_mode")),
+      output_hit_enter: (await store.get<boolean>("output_hit_enter")) ?? false,
 
       quiet_audio_gate_enabled:
         (await store.get<boolean>("quiet_audio_gate_enabled")) ?? true,
@@ -623,6 +635,12 @@ export const tauriAPI = {
   async updateOutputMode(mode: OutputMode): Promise<void> {
     const store = await getStore();
     await store.set("output_mode", mode);
+    await store.save();
+  },
+
+  async updateOutputHitEnter(enabled: boolean): Promise<void> {
+    const store = await getStore();
+    await store.set("output_hit_enter", enabled);
     await store.save();
   },
 
