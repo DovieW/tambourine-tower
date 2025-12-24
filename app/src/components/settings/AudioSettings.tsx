@@ -1,14 +1,28 @@
-import { Group, NumberInput, Slider, Switch, Tooltip } from "@mantine/core";
+import {
+  ActionIcon,
+  Group,
+  NumberInput,
+  Slider,
+  Switch,
+  Tooltip,
+} from "@mantine/core";
+import { notifications } from "@mantine/notifications";
+import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  useRecordingsStats,
   useSettings,
+  useUpdateMaxSavedRecordings,
   useUpdateNoiseGateStrength,
   useUpdateQuietAudioGateEnabled,
   useUpdateQuietAudioMinDurationSecs,
   useUpdateQuietAudioPeakDbfsThreshold,
   useUpdateQuietAudioRmsDbfsThreshold,
 } from "../../lib/queries";
-import type { RewriteProgramPromptProfile } from "../../lib/tauri";
+import {
+  recordingsAPI,
+  type RewriteProgramPromptProfile,
+} from "../../lib/tauri";
 import { DeviceSelector } from "../DeviceSelector";
 
 const GLOBAL_ONLY_TOOLTIP =
@@ -20,6 +34,9 @@ export function AudioSettings({
   editingProfileId?: string;
 }) {
   const { data: settings } = useSettings();
+
+  const updateMaxSavedRecordings = useUpdateMaxSavedRecordings();
+  const recordingsStats = useRecordingsStats();
 
   const updateQuietAudioGateEnabled = useUpdateQuietAudioGateEnabled();
   const updateQuietAudioMinDurationSecs = useUpdateQuietAudioMinDurationSecs();
@@ -45,6 +62,35 @@ export function AudioSettings({
   const quietAudioPeakDbfsThreshold =
     settings?.quiet_audio_peak_dbfs_threshold ?? -50;
 
+  const maxSavedRecordings = settings?.max_saved_recordings ?? 1000;
+
+  const handleOpenRecordingsFolder = async () => {
+    try {
+      await recordingsAPI.openRecordingsFolder();
+    } catch (e) {
+      notifications.show({
+        title: "Recordings",
+        message: String(e),
+        color: "red",
+      });
+    }
+  };
+
+  const recordingsSummary = (() => {
+    const stats = recordingsStats.data;
+    if (!stats) return null;
+    if (typeof stats.count !== "number" || !Number.isFinite(stats.count))
+      return null;
+    if (typeof stats.bytes !== "number" || !Number.isFinite(stats.bytes))
+      return null;
+
+    const gb = stats.bytes / 1024 ** 3;
+    return {
+      count: Math.max(0, Math.round(stats.count)),
+      gb,
+    };
+  })();
+
   const noiseGateStrengthFromSettings = settings?.noise_gate_strength ?? 0;
   const [noiseGateStrengthDraft, setNoiseGateStrengthDraft] = useState<
     number | null
@@ -61,6 +107,67 @@ export function AudioSettings({
   const content = (
     <>
       <DeviceSelector />
+
+      <div className="settings-row">
+        <div>
+          <p className="settings-label">Max recordings to save</p>
+          <p className="settings-description">
+            Keep at most this many recordings on disk.
+            {recordingsStats.isLoading
+              ? " (Calculating storage…)"
+              : recordingsSummary === null
+              ? ""
+              : ` (Currently saved ${
+                  recordingsSummary.count
+                } recordings at ${recordingsSummary.gb.toFixed(2)} GB)`}
+          </p>
+        </div>
+        <Group gap={8} align="center">
+          <Tooltip label="Open recordings folder" withArrow position="top">
+            <span>
+              <ActionIcon
+                variant="default"
+                size={36}
+                onClick={() => {
+                  handleOpenRecordingsFolder().catch(console.error);
+                }}
+                aria-label="Open recordings folder"
+                styles={{
+                  root: {
+                    backgroundColor: "var(--bg-elevated)",
+                    borderColor: "var(--border-default)",
+                    color: "var(--text-primary)",
+                    height: 36,
+                    width: 36,
+                  },
+                }}
+              >
+                <FolderOpen size={14} style={{ opacity: 0.75 }} />
+              </ActionIcon>
+            </span>
+          </Tooltip>
+          <NumberInput
+            value={maxSavedRecordings}
+            onChange={(value) => {
+              const next = typeof value === "number" ? value : 1000;
+              updateMaxSavedRecordings.mutate(next);
+            }}
+            min={1}
+            max={100000}
+            step={100}
+            clampBehavior="strict"
+            disabled={isProfileScope}
+            styles={{
+              input: {
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--border-default)",
+                color: "var(--text-primary)",
+                width: 140,
+              },
+            }}
+          />
+        </Group>
+      </div>
 
       <div className="settings-row">
         <div>

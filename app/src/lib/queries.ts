@@ -7,6 +7,7 @@ import {
   type HotkeyConfig,
   llmAPI,
   logsAPI,
+  recordingsAPI,
   type AudioCue,
   type OutputMode,
   type PlayingAudioHandling,
@@ -323,6 +324,26 @@ export function useUpdateNoiseGateStrength() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
+  });
+}
+
+export function useUpdateMaxSavedRecordings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (max: number) => tauriAPI.updateMaxSavedRecordings(max),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
+export function useRecordingsStats() {
+  return useQuery({
+    queryKey: ["recordingsStats"],
+    queryFn: () => recordingsAPI.getRecordingsStats(),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: 10000,
   });
 }
 

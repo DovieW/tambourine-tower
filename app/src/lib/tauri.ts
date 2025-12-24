@@ -158,6 +158,9 @@ export interface AppSettings {
 
   // Experimental: noise gate (0 = off, 100 = strongest)
   noise_gate_strength: number;
+
+  // How many recordings/history entries to retain
+  max_saved_recordings: number;
 }
 
 function normalizePlayingAudioHandling(value: unknown): PlayingAudioHandling {
@@ -199,6 +202,13 @@ function normalizeNoiseGateStrength(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   const rounded = Math.round(value);
   return Math.min(100, Math.max(0, rounded));
+}
+
+function normalizeMaxSavedRecordings(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1000;
+  const rounded = Math.round(value);
+  // 1..100000 (defensive)
+  return Math.min(100000, Math.max(1, rounded));
 }
 
 // ============================================================================
@@ -537,6 +547,10 @@ export const tauriAPI = {
       noise_gate_strength: normalizeNoiseGateStrength(
         await store.get("noise_gate_strength")
       ),
+
+      max_saved_recordings: normalizeMaxSavedRecordings(
+        await store.get("max_saved_recordings")
+      ),
     };
   },
 
@@ -747,6 +761,12 @@ export const tauriAPI = {
       "noise_gate_strength",
       normalizeNoiseGateStrength(strength)
     );
+    await store.save();
+  },
+
+  async updateMaxSavedRecordings(max: number): Promise<void> {
+    const store = await getStore();
+    await store.set("max_saved_recordings", normalizeMaxSavedRecordings(max));
     await store.save();
   },
 
@@ -971,6 +991,11 @@ export interface RequestLog {
   entries: LogEntry[];
 }
 
+export interface RecordingsStats {
+  count: number;
+  bytes: number;
+}
+
 export const logsAPI = {
   getRequestLogs: (limit?: number) =>
     invoke<RequestLog[]>("get_request_logs", { limit: limit ?? 100 }),
@@ -996,4 +1021,14 @@ export const recordingsAPI = {
     invoke<string | null>("recording_get_wav_base64", {
       requestId: params.requestId,
     }),
+
+  // Open recordings directory in file explorer.
+  openRecordingsFolder: () => invoke<void>("recordings_open_folder"),
+
+  // Total size (bytes) used by saved recordings.
+  getRecordingsStorageBytes: () =>
+    invoke<number>("recordings_get_storage_bytes"),
+
+  // Stats for UI display (count + bytes).
+  getRecordingsStats: () => invoke<RecordingsStats>("recordings_get_stats"),
 };

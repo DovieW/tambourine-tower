@@ -5,11 +5,34 @@
 
 use crate::audio_capture::VadAutoStopConfig;
 use crate::pipeline::{LlmOutcome, PipelineConfig, PipelineError, PipelineState, SharedPipeline};
-use crate::recordings::RecordingStore;
+use crate::recordings::{RecordingStore, RecordingsStats};
 use crate::request_log::RequestLogStore;
 use crate::history::{HistoryStorage, RequestModelInfo};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+#[cfg(desktop)]
+use tauri_plugin_store::StoreExt;
+
+fn get_max_saved_recordings(app: &AppHandle) -> usize {
+    #[cfg(desktop)]
+    {
+        let default: u64 = 1000;
+        let raw = app
+            .store("settings.json")
+            .ok()
+            .and_then(|store| store.get("max_saved_recordings"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default);
+
+        return (raw.clamp(1, 100_000)) as usize;
+    }
+
+    #[cfg(not(desktop))]
+    {
+        1000
+    }
+}
 
 /// Tauri-compatible error type for commands
 #[derive(Debug, serde::Serialize)]
@@ -93,6 +116,37 @@ pub fn recording_get_wav_base64(
     Ok(Some(encoded))
 }
 
+/// Open the recordings folder in the OS file manager.
+#[tauri::command]
+pub fn recordings_open_folder(app: AppHandle) -> Result<(), CommandError> {
+    let store = app
+        .try_state::<RecordingStore>()
+        .ok_or_else(|| CommandError::from("Recording store not available".to_string()))?;
+
+    open::that(store.directory())
+        .map_err(|e| CommandError::from(format!("Failed to open recordings folder: {}", e)))
+}
+
+/// Total bytes used by saved recordings on disk.
+#[tauri::command]
+pub fn recordings_get_storage_bytes(app: AppHandle) -> Result<u64, CommandError> {
+    let store = app
+        .try_state::<RecordingStore>()
+        .ok_or_else(|| CommandError::from("Recording store not available".to_string()))?;
+
+    store.total_size_bytes().map_err(CommandError::from)
+}
+
+/// Stats about saved recordings (count + total bytes).
+#[tauri::command]
+pub fn recordings_get_stats(app: AppHandle) -> Result<RecordingsStats, CommandError> {
+    let store = app
+        .try_state::<RecordingStore>()
+        .ok_or_else(|| CommandError::from("Recording store not available".to_string()))?;
+
+    store.stats().map_err(CommandError::from)
+}
+
 /// Start recording audio using the pipeline
 #[tauri::command]
 pub fn pipeline_start_recording(
@@ -144,6 +198,8 @@ pub async fn pipeline_stop_and_transcribe(
     app: AppHandle,
     pipeline: State<'_, SharedPipeline>,
 ) -> Result<String, CommandError> {
+    let max_saved_recordings = get_max_saved_recordings(&app);
+
     // Ensure Escape-to-cancel is available during the transcription phase.
     #[cfg(desktop)]
     crate::set_escape_cancel_shortcut_enabled(&app, true);
@@ -171,7 +227,11 @@ pub async fn pipeline_stop_and_transcribe(
     // Create an in-progress history entry so the History view shows a running request.
     if let Some(req_id) = active_request_id.as_deref() {
         if let Some(history) = app.try_state::<HistoryStorage>() {
-            let _ = history.add_request_entry(req_id.to_string(), model_info);
+            let _ = history.add_request_entry(
+                req_id.to_string(),
+                model_info,
+                max_saved_recordings,
+            );
             let _ = app.emit("history-changed", ());
         }
     }
@@ -263,7 +323,9 @@ pub async fn pipeline_stop_and_transcribe(
                 app.try_state::<RecordingStore>(),
             ) {
                 if let Some(wav) = pipeline.clone_last_wav_bytes() {
-                    let _ = store.save_wav(req_id, &wav);
+                    if store.save_wav(req_id, &wav).is_ok() {
+                        let _ = store.prune_to_max_files(max_saved_recordings);
+                    }
                 }
             }
 
@@ -346,7 +408,9 @@ pub async fn pipeline_stop_and_transcribe(
         app.try_state::<RecordingStore>(),
     ) {
         if let Some(wav) = pipeline.clone_last_wav_bytes() {
-            let _ = store.save_wav(req_id, &wav);
+            if store.save_wav(req_id, &wav).is_ok() {
+                let _ = store.prune_to_max_files(max_saved_recordings);
+            }
         }
     }
 
@@ -378,6 +442,8 @@ pub async fn pipeline_retry_transcription(
     pipeline: State<'_, SharedPipeline>,
     request_id: String,
 ) -> Result<String, CommandError> {
+    let max_saved_recordings = get_max_saved_recordings(&app);
+
     // Allow Escape-to-cancel while the retry transcription is running.
     #[cfg(desktop)]
     crate::set_escape_cancel_shortcut_enabled(&app, true);
@@ -411,7 +477,11 @@ pub async fn pipeline_retry_transcription(
     // Create a history entry for the retry attempt.
     if let Some(req_id) = new_request_id.as_deref() {
         if let Some(history) = app.try_state::<HistoryStorage>() {
-            let _ = history.add_request_entry(req_id.to_string(), model_info);
+            let _ = history.add_request_entry(
+                req_id.to_string(),
+                model_info,
+                max_saved_recordings,
+            );
             let _ = app.emit("history-changed", ());
         }
     }
@@ -459,7 +529,9 @@ pub async fn pipeline_retry_transcription(
 
     // Persist audio under the *new* request id (best-effort)
     if let Some(req_id) = new_request_id.as_deref() {
-        let _ = recording_store.save_wav(req_id, &wav);
+        if recording_store.save_wav(req_id, &wav).is_ok() {
+            let _ = recording_store.prune_to_max_files(max_saved_recordings);
+        }
     }
 
     let final_text = result.final_text.clone();

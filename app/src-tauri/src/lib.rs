@@ -109,6 +109,9 @@ fn ensure_default_settings(app: &AppHandle) -> Result<(), Box<dyn std::error::Er
     set_if_missing("stt_provider", json!("groq"));
     set_if_missing("stt_transcription_prompt", json!(null));
     set_if_missing("stt_timeout_seconds", json!(10.0));
+    // How many recordings/history items to retain (impacts disk usage).
+    // Keep this aligned with the UI default.
+    set_if_missing("max_saved_recordings", json!(1000));
     set_if_missing("overlay_mode", json!("recording_only"));
     set_if_missing("widget_position", json!("bottom-center"));
     set_if_missing("output_mode", json!("paste"));
@@ -617,7 +620,18 @@ fn stop_recording(
             // Create an in-progress history entry while we transcribe.
             if let Some(ref req_id) = request_id {
                 if let Some(history) = app_clone.try_state::<HistoryStorage>() {
-                    let _ = history.add_request_entry(req_id.clone(), model_info);
+                    let max_saved_recordings: usize = (get_setting_from_store(
+                        &app_clone,
+                        "max_saved_recordings",
+                        1000u64,
+                    ))
+                    .clamp(1, 100_000) as usize;
+
+                    let _ = history.add_request_entry(
+                        req_id.clone(),
+                        model_info,
+                        max_saved_recordings,
+                    );
                     let _ = app_clone.emit("history-changed", ());
                 }
             }
@@ -706,7 +720,16 @@ fn stop_recording(
                         app_clone.try_state::<RecordingStore>(),
                     ) {
                         if let Some(wav) = pipeline_clone.clone_last_wav_bytes() {
-                            let _ = store.save_wav(req_id, &wav);
+                            if store.save_wav(req_id, &wav).is_ok() {
+                                let max_saved_recordings: usize = (get_setting_from_store(
+                                    &app_clone,
+                                    "max_saved_recordings",
+                                    1000u64,
+                                ))
+                                .clamp(1, 100_000) as usize;
+
+                                let _ = store.prune_to_max_files(max_saved_recordings);
+                            }
                         }
                     }
 
@@ -820,7 +843,16 @@ fn stop_recording(
                         app_clone.try_state::<RecordingStore>(),
                     ) {
                         if let Some(wav) = pipeline_clone.clone_last_wav_bytes() {
-                            let _ = store.save_wav(req_id, &wav);
+                            if store.save_wav(req_id, &wav).is_ok() {
+                                let max_saved_recordings: usize = (get_setting_from_store(
+                                    &app_clone,
+                                    "max_saved_recordings",
+                                    1000u64,
+                                ))
+                                .clamp(1, 100_000) as usize;
+
+                                let _ = store.prune_to_max_files(max_saved_recordings);
+                            }
                         }
                     }
 
@@ -1262,6 +1294,10 @@ pub fn run() {
             // Recording file access (for playback)
             commands::recording::recording_get_wav_path,
             commands::recording::recording_get_wav_base64,
+            // Recording folder helpers
+            commands::recording::recordings_open_folder,
+            commands::recording::recordings_get_storage_bytes,
+            commands::recording::recordings_get_stats,
             // Config commands (replacing Python server)
             commands::config::get_default_sections,
             commands::config::get_available_providers,
@@ -1311,6 +1347,17 @@ pub fn run() {
 
             let history_storage = HistoryStorage::new(app_data_dir);
             app.manage(history_storage);
+
+            // Apply the configured history retention limit immediately so existing installs
+            // don't keep more entries than the UI/backend intend.
+            #[cfg(desktop)]
+            {
+                let max_saved_recordings: u64 =
+                    get_setting_from_store(app.handle(), "max_saved_recordings", 1000u64);
+                if let Some(history) = app.try_state::<HistoryStorage>() {
+                    let _ = history.trim_to(max_saved_recordings as usize);
+                }
+            }
 
             // Initialize request log store
             let request_log_store = request_log::RequestLogStore::new();

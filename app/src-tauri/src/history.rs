@@ -138,7 +138,7 @@ impl HistoryStorage {
     }
 
     /// Add a new entry to the history
-    pub fn add_entry(&self, text: String) -> Result<HistoryEntry, String> {
+    pub fn add_entry(&self, text: String, max_entries: usize) -> Result<HistoryEntry, String> {
         let entry = HistoryEntry::new(text);
         {
             let mut data = self
@@ -149,9 +149,9 @@ impl HistoryStorage {
             // Add to the beginning (newest first)
             data.entries.insert(0, entry.clone());
 
-            // Limit to 500 entries
-            if data.entries.len() > 500 {
-                data.entries.truncate(500);
+            let max = max_entries.max(1);
+            if data.entries.len() > max {
+                data.entries.truncate(max);
             }
         }
         self.save()?;
@@ -162,7 +162,12 @@ impl HistoryStorage {
     ///
     /// This is used to show a placeholder in the History view while a transcription
     /// is running, and to keep a failed attempt visible with a retry button.
-    pub fn add_request_entry(&self, request_id: String, model_info: RequestModelInfo) -> Result<HistoryEntry, String> {
+    pub fn add_request_entry(
+        &self,
+        request_id: String,
+        model_info: RequestModelInfo,
+        max_entries: usize,
+    ) -> Result<HistoryEntry, String> {
         let entry = HistoryEntry::new_request_in_progress(request_id, model_info);
         {
             let mut data = self
@@ -173,13 +178,28 @@ impl HistoryStorage {
             // Add to the beginning (newest first)
             data.entries.insert(0, entry.clone());
 
-            // Limit to 5000 entries
-            if data.entries.len() > 5000 {
-                data.entries.truncate(5000);
+            let max = max_entries.max(1);
+            if data.entries.len() > max {
+                data.entries.truncate(max);
             }
         }
         self.save()?;
         Ok(entry)
+    }
+
+    /// Truncate history to at most `max_entries` entries.
+    pub fn trim_to(&self, max_entries: usize) -> Result<(), String> {
+        let max = max_entries.max(1);
+        {
+            let mut data = self
+                .data
+                .write()
+                .map_err(|e| format!("Failed to write history: {}", e))?;
+            if data.entries.len() > max {
+                data.entries.truncate(max);
+            }
+        }
+        self.save()
     }
 
     /// Mark an existing request entry as successful and set the final text.

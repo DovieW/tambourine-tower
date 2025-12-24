@@ -16,6 +16,7 @@ import {
   Switch,
   Text,
   TextInput,
+  Tooltip,
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
@@ -30,6 +31,7 @@ import {
   ChevronsRight,
   Copy,
   Filter,
+  FolderOpen,
   MessageSquare,
   Pause,
   Play,
@@ -39,15 +41,77 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Store } from "@tauri-apps/plugin-store";
 import {
   useClearHistory,
   useDeleteHistoryEntry,
   useHistory,
+  useRecordingsStats,
   useRetryTranscription,
 } from "../lib/queries";
-import { tauriAPI } from "../lib/tauri";
+import { recordingsAPI, tauriAPI } from "../lib/tauri";
 import { useRecordingPlayer } from "../lib/useRecordingPlayer";
 import { listAllLlmModelKeys, listAllSttModelKeys } from "../lib/modelOptions";
+
+const HISTORY_FILTERS_STORE_FILE = "ui.json";
+const HISTORY_FILTERS_STORE_KEY = "history_feed_filters_v1";
+
+type PersistedHistoryFilters = {
+  filterText: string;
+  showFailed: boolean;
+  showEmptyTranscript: boolean;
+  selectedSttModelKeys: string[];
+  selectedLlmModelKeys: string[];
+};
+
+let historyFiltersStore: Store | null = null;
+
+async function getHistoryFiltersStore(): Promise<Store> {
+  if (!historyFiltersStore) {
+    historyFiltersStore = await Store.load(HISTORY_FILTERS_STORE_FILE);
+  }
+  return historyFiltersStore;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function normalizePersistedHistoryFilters(
+  value: unknown
+): PersistedHistoryFilters | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+
+  const filterText = typeof v.filterText === "string" ? v.filterText : "";
+  const showFailed = typeof v.showFailed === "boolean" ? v.showFailed : true;
+  const showEmptyTranscript =
+    typeof v.showEmptyTranscript === "boolean" ? v.showEmptyTranscript : false;
+
+  const rawSelectedSttModelKeys = normalizeStringArray(v.selectedSttModelKeys);
+  const rawSelectedLlmModelKeys = normalizeStringArray(v.selectedLlmModelKeys);
+
+  // Defensive: drop unknown keys so the checkbox UI doesn't get stuck with
+  // selections that it can't render/unselect.
+  const knownSttKeys = new Set(listAllSttModelKeys().map((o) => o.key));
+  const knownLlmKeys = new Set(listAllLlmModelKeys().map((o) => o.key));
+
+  const selectedSttModelKeys = rawSelectedSttModelKeys.filter((k) =>
+    knownSttKeys.has(k)
+  );
+  const selectedLlmModelKeys = rawSelectedLlmModelKeys.filter((k) =>
+    knownLlmKeys.has(k)
+  );
+
+  return {
+    filterText,
+    showFailed,
+    showEmptyTranscript,
+    selectedSttModelKeys,
+    selectedLlmModelKeys,
+  };
+}
 
 const HISTORY_PAGE_SIZE = 25;
 
@@ -106,10 +170,17 @@ function groupHistoryByDate(
 export function HistoryFeed() {
   const queryClient = useQueryClient();
   const { data: history, isLoading, error } = useHistory();
+  const recordingsStats = useRecordingsStats();
   const deleteEntry = useDeleteHistoryEntry();
   const clearHistory = useClearHistory();
   const retryMutation = useRetryTranscription();
   const clipboard = useClipboard();
+
+  const recordingsGbForTooltip = (() => {
+    const bytes = recordingsStats.data?.bytes;
+    if (typeof bytes !== "number" || !Number.isFinite(bytes)) return null;
+    return bytes / 1024 ** 3;
+  })();
 
   const player = useRecordingPlayer({
     onError: (message) => {
@@ -136,6 +207,76 @@ export function HistoryFeed() {
   const [selectedLlmModelKeys, setSelectedLlmModelKeys] = useState<string[]>(
     []
   );
+
+  // Persist history filters (UI-only) across app restarts.
+  // Hydration is async; we gate saving until after it completes.
+  const [hasHydratedPersistedFilters, setHasHydratedPersistedFilters] =
+    useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrate = async () => {
+      try {
+        const store = await getHistoryFiltersStore();
+        const raw = await store.get(HISTORY_FILTERS_STORE_KEY);
+        const normalized = normalizePersistedHistoryFilters(raw);
+
+        if (!normalized || cancelled) return;
+
+        setFilterText(normalized.filterText);
+        setShowFailed(normalized.showFailed);
+        setShowEmptyTranscript(normalized.showEmptyTranscript);
+        setSelectedSttModelKeys(normalized.selectedSttModelKeys);
+        setSelectedLlmModelKeys(normalized.selectedLlmModelKeys);
+      } catch (e) {
+        // Never block history UI if persistence fails.
+        console.warn("Failed to hydrate history filters:", e);
+      } finally {
+        if (!cancelled) setHasHydratedPersistedFilters(true);
+      }
+    };
+
+    hydrate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasHydratedPersistedFilters) return;
+
+    const timeout = setTimeout(() => {
+      const persist = async () => {
+        try {
+          const store = await getHistoryFiltersStore();
+          const payload: PersistedHistoryFilters = {
+            filterText,
+            showFailed,
+            showEmptyTranscript,
+            selectedSttModelKeys,
+            selectedLlmModelKeys,
+          };
+          await store.set(HISTORY_FILTERS_STORE_KEY, payload);
+          await store.save();
+        } catch (e) {
+          console.warn("Failed to persist history filters:", e);
+        }
+      };
+
+      persist();
+    }, 250);
+
+    return () => clearTimeout(timeout);
+  }, [
+    hasHydratedPersistedFilters,
+    filterText,
+    showFailed,
+    showEmptyTranscript,
+    selectedSttModelKeys,
+    selectedLlmModelKeys,
+  ]);
 
   // Listen for history changes from other windows (e.g., overlay after transcription)
   useEffect(() => {
@@ -164,6 +305,18 @@ export function HistoryFeed() {
         closeConfirm();
       },
     });
+  };
+
+  const handleOpenFolder = async () => {
+    try {
+      await recordingsAPI.openRecordingsFolder();
+    } catch (e) {
+      notifications.show({
+        title: "Recordings",
+        message: String(e),
+        color: "red",
+      });
+    }
   };
 
   const sttModelUsageCounts = useMemo(() => {
@@ -369,15 +522,43 @@ export function HistoryFeed() {
     <div className="animate-in animate-in-delay-2">
       <div className="section-header">
         <span className="section-title section-title--no-accent">History</span>
-        <Button
-          variant="subtle"
-          size="compact-sm"
-          color="gray"
-          onClick={openConfirm}
-          disabled={clearHistory.isPending}
-        >
-          Clear All
-        </Button>
+        <Group gap={6}>
+          <Tooltip label="Clear all history" withArrow>
+            <span style={{ display: "inline-block" }}>
+              <Button
+                variant="subtle"
+                size="compact-sm"
+                color="gray"
+                onClick={openConfirm}
+                disabled={clearHistory.isPending}
+              >
+                Clear All
+              </Button>
+            </span>
+          </Tooltip>
+
+          <Tooltip
+            label={
+              recordingsStats.isLoading || recordingsGbForTooltip === null
+                ? "Open recordings folder"
+                : `Open recordings folder • ${recordingsGbForTooltip.toFixed(
+                    2
+                  )} GB`
+            }
+            withArrow
+          >
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              color="gray"
+              px={6}
+              onClick={handleOpenFolder}
+              aria-label="Open recordings folder"
+            >
+              <FolderOpen size={14} />
+            </Button>
+          </Tooltip>
+        </Group>
       </div>
 
       <div
