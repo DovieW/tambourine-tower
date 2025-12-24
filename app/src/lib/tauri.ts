@@ -93,6 +93,8 @@ export interface RewriteProgramPromptProfile {
 
 export type PlayingAudioHandling = "none" | "mute" | "pause" | "mute_and_pause";
 
+export type AudioCue = "tangerine" | "maraca" | "clave" | "tambourine";
+
 export type OverlayMode = "always" | "never" | "recording_only";
 
 export type WidgetPosition =
@@ -128,6 +130,7 @@ export interface AppSettings {
   paste_last_hotkey: HotkeyConfig;
   selected_mic_id: string | null;
   sound_enabled: boolean;
+  audio_cue: AudioCue;
   /** Optional user override; null/undefined means use default Tangerine accent */
   accent_color: string | null;
   // Global gate for the optional LLM rewrite step
@@ -176,6 +179,20 @@ function normalizePlayingAudioHandling(value: unknown): PlayingAudioHandling {
 
   // Default for fresh installs / missing setting
   return "mute";
+}
+
+function normalizeAudioCue(value: unknown): AudioCue {
+  if (
+    value === "tangerine" ||
+    value === "maraca" ||
+    value === "clave" ||
+    value === "tambourine"
+  ) {
+    return value;
+  }
+
+  // Default for fresh installs / missing setting
+  return "tangerine";
 }
 
 function normalizeNoiseGateStrength(value: unknown): number {
@@ -475,6 +492,7 @@ export const tauriAPI = {
       selected_mic_id:
         (await store.get<string | null>("selected_mic_id")) ?? null,
       sound_enabled: (await store.get<boolean>("sound_enabled")) ?? true,
+      audio_cue: normalizeAudioCue(await store.get("audio_cue")),
       accent_color: normalizeHexColor(
         (await store.get<string | null>("accent_color")) ?? null
       ),
@@ -512,9 +530,9 @@ export const tauriAPI = {
       quiet_audio_min_duration_secs:
         (await store.get<number>("quiet_audio_min_duration_secs")) ?? 0.15,
       quiet_audio_rms_dbfs_threshold:
-        (await store.get<number>("quiet_audio_rms_dbfs_threshold")) ?? -50,
+        (await store.get<number>("quiet_audio_rms_dbfs_threshold")) ?? -60,
       quiet_audio_peak_dbfs_threshold:
-        (await store.get<number>("quiet_audio_peak_dbfs_threshold")) ?? -40,
+        (await store.get<number>("quiet_audio_peak_dbfs_threshold")) ?? -50,
 
       noise_gate_strength: normalizeNoiseGateStrength(
         await store.get("noise_gate_strength")
@@ -580,6 +598,15 @@ export const tauriAPI = {
     const store = await getStore();
     await store.set("sound_enabled", enabled);
     await store.save();
+  },
+
+  async updateAudioCue(cue: AudioCue): Promise<void> {
+    const store = await getStore();
+    await store.set("audio_cue", normalizeAudioCue(cue));
+    await store.save();
+
+    // Notify other windows (overlay) to refresh cached settings.
+    await emit("settings-changed", {});
   },
 
   async updateRewriteLlmEnabled(enabled: boolean): Promise<void> {

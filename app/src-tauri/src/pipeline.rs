@@ -15,7 +15,7 @@
 //! - Multiple provider support (OpenAI, Anthropic, Ollama)
 //! - Configurable prompts for dictation cleanup
 
-use crate::audio_capture::{AudioCapture, AudioCaptureError, AudioCaptureEvent, AudioLevelStats, VadAutoStopConfig};
+use crate::audio_capture::{AudioCapture, AudioCaptureError, AudioCaptureEvent, AudioLevelSnapshot, AudioLevelStats, VadAutoStopConfig};
 use crate::llm::{
     format_text, AnthropicLlmProvider, GroqLlmProvider, LlmConfig, LlmError, LlmProvider,
     OllamaLlmProvider, OpenAiLlmProvider,
@@ -95,8 +95,8 @@ const MAX_WAV_SIZE_BYTES: usize = 50 * 1024 * 1024;
 ///
 /// Thresholds are in dBFS (decibels relative to full scale, where 0 dBFS is max amplitude).
 const DEFAULT_QUIET_AUDIO_MIN_DURATION_SECS: f32 = 0.15;
-const DEFAULT_QUIET_AUDIO_RMS_DBFS_THRESHOLD: f32 = -50.0;
-const DEFAULT_QUIET_AUDIO_PEAK_DBFS_THRESHOLD: f32 = -40.0;
+const DEFAULT_QUIET_AUDIO_RMS_DBFS_THRESHOLD: f32 = -60.0;
+const DEFAULT_QUIET_AUDIO_PEAK_DBFS_THRESHOLD: f32 = -50.0;
 
 fn amp_to_dbfs(amp: f32) -> f32 {
     if !amp.is_finite() || amp <= 0.0 {
@@ -263,6 +263,11 @@ impl TranscriptionResult {
 /// Configuration for the recording pipeline
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
+    /// Optional backend input device name (CPAL device name).
+    ///
+    /// When set, recording will attempt to use the first input device whose name
+    /// matches exactly, falling back to the system default if not found.
+    pub input_device_name: Option<String>,
     /// Maximum recording duration in seconds
     pub max_duration_secs: f32,
     /// STT provider to use
@@ -313,6 +318,7 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
+            input_device_name: None,
             max_duration_secs: 300.0, // 5 minutes max
             stt_provider: "groq".to_string(),
             stt_api_key: String::new(),
@@ -578,14 +584,43 @@ fn create_llm_provider(config: &LlmConfig) -> Arc<dyn LlmProvider> {
 /// Provides robust error handling and cancellation support.
 pub struct SharedPipeline {
     inner: Arc<Mutex<PipelineInner>>,
+    level_meter: crate::audio_capture::SharedAudioLevelMeter,
+    waveform_meter: crate::audio_capture::SharedAudioWaveformMeter,
 }
 
 impl SharedPipeline {
     /// Create a new shared pipeline
     pub fn new(config: PipelineConfig) -> Self {
+        let inner = PipelineInner::new(config);
+        let level_meter = inner.audio_capture.shared_level_meter();
+        let waveform_meter = inner.audio_capture.shared_waveform_meter();
         Self {
-            inner: Arc::new(Mutex::new(PipelineInner::new(config))),
+            inner: Arc::new(Mutex::new(inner)),
+            level_meter,
+            waveform_meter,
         }
+    }
+
+    /// Try to read the current state without blocking.
+    ///
+    /// This is useful for UI publishers that should not stall the runtime when
+    /// the pipeline mutex is briefly held (e.g., during start-up).
+    pub fn try_state(&self) -> Option<PipelineState> {
+        self.inner.try_lock().ok().map(|inner| inner.state)
+    }
+
+    /// Get the most recent realtime audio input level snapshot without locking
+    /// the pipeline mutex.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn audio_level_snapshot_fast(&self) -> AudioLevelSnapshot {
+        self.level_meter.snapshot()
+    }
+
+    /// Get the most recent realtime waveform min/max buckets without locking the
+    /// pipeline mutex.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn audio_waveform_snapshot_fast(&self) -> crate::audio_capture::AudioWaveformSnapshot {
+        self.waveform_meter.snapshot()
     }
 
     /// Start recording
@@ -604,7 +639,13 @@ impl SharedPipeline {
         inner.cancel_token = Some(cancel_token);
 
         let max_duration = inner.config.max_duration_secs;
-        match inner.audio_capture.start(max_duration) {
+        // Clone out of the config to avoid borrowing `inner` immutably while calling into
+        // `audio_capture` mutably.
+        let input_device_name = inner.config.input_device_name.clone();
+        match inner
+            .audio_capture
+            .start_with_device_name(max_duration, input_device_name.as_deref())
+        {
             Ok(()) => {
                 inner.state = PipelineState::Recording;
                 log::info!("Pipeline: Recording started");
@@ -1552,6 +1593,22 @@ impl SharedPipeline {
             .unwrap_or(PipelineState::Error)
     }
 
+    /// Get the most recent realtime audio input level snapshot.
+    ///
+    /// This is cheap and intended for UI metering (e.g., overlay waveform). The snapshot is
+    /// updated from the CPAL input callback while recording.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn audio_level_snapshot(&self) -> AudioLevelSnapshot {
+        self.inner
+            .lock()
+            .map(|inner| inner.audio_capture.level_snapshot())
+            .unwrap_or(AudioLevelSnapshot {
+                seq: 0,
+                rms: 0.0,
+                peak: 0.0,
+            })
+    }
+
     /// Get the name of the current STT provider
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn current_provider_name(&self) -> String {
@@ -1606,6 +1663,8 @@ impl Clone for SharedPipeline {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            level_meter: self.level_meter.clone(),
+            waveform_meter: self.waveform_meter.clone(),
         }
     }
 }

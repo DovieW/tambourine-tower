@@ -9,13 +9,14 @@ import {
   Switch,
   Tooltip,
 } from "@mantine/core";
-import { Info, RefreshCcw, RotateCcw } from "lucide-react";
+import { Info, Play, RefreshCcw, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useIsAudioMuteSupported,
   useSettings,
   useUpdateAccentColor,
+  useUpdateAudioCue,
   useUpdateOutputHitEnter,
   useUpdateOutputMode,
   useUpdateOverlayMode,
@@ -26,6 +27,7 @@ import {
 } from "../../lib/queries";
 import { DEFAULT_ACCENT_HEX, applyAccentColor } from "../../lib/accentColor";
 import type {
+  AudioCue,
   OutputMode,
   OverlayMode,
   PlayingAudioHandling,
@@ -34,6 +36,9 @@ import type {
 } from "../../lib/tauri";
 
 const INHERIT_TOOLTIP = "Inheriting from Default profile";
+
+const GLOBAL_ONLY_TOOLTIP =
+  "This setting can only be changed in the Default profile";
 
 /** Helper to check if a profile value is inheriting (null/undefined) */
 function isInheriting<T>(value: T | null | undefined): boolean {
@@ -92,6 +97,14 @@ const PLAYING_AUDIO_HANDLING_OPTIONS: Array<{
   { value: "mute_and_pause", label: "Mute and Pause" },
 ];
 
+const AUDIO_CUE_OPTIONS: Array<{ value: AudioCue; label: string }> = [
+  { value: "tangerine", label: "Tangerine" },
+  { value: "maraca", label: "Maraca" },
+  { value: "clave", label: "Claves" },
+  // Required: current cue should be last in the dropdown.
+  { value: "tambourine", label: "Tambourine" },
+];
+
 function getProfileValue<T>(
   profileValue: T | null | undefined,
   globalValue: T
@@ -108,6 +121,7 @@ export function UiSettings({
   const { data: isAudioMuteSupported } = useIsAudioMuteSupported();
   const updateSoundEnabled = useUpdateSoundEnabled();
   const updateAccentColor = useUpdateAccentColor();
+  const updateAudioCue = useUpdateAudioCue();
   const updatePlayingAudioHandling = useUpdatePlayingAudioHandling();
   const updateOverlayMode = useUpdateOverlayMode();
   const updateWidgetPosition = useUpdateWidgetPosition();
@@ -151,6 +165,14 @@ export function UiSettings({
     : globalSoundEnabled;
   const soundInheriting =
     isProfileScope && isInheriting(profile?.sound_enabled);
+
+  const audioCueFromSettings: AudioCue = settings?.audio_cue ?? "tangerine";
+  const [audioCueDropdownValue, setAudioCueDropdownValue] =
+    useState<AudioCue>(audioCueFromSettings);
+
+  useEffect(() => {
+    setAudioCueDropdownValue(audioCueFromSettings);
+  }, [audioCueFromSettings]);
 
   const globalPlayingAudioHandling: PlayingAudioHandling =
     settings?.playing_audio_handling ?? "mute";
@@ -247,6 +269,23 @@ export function UiSettings({
       return;
     }
     updateSoundEnabled.mutate(checked);
+  };
+
+  const handleAudioCueChange = (value: string | null) => {
+    if (!value) return;
+    if (isProfileScope) return;
+
+    const next = value as AudioCue;
+    setAudioCueDropdownValue(next);
+    updateAudioCue.mutate(next);
+  };
+
+  const handlePreviewAudioCue = async () => {
+    try {
+      await invoke("play_audio_cue_preview", { cue: audioCueDropdownValue });
+    } catch (err) {
+      console.error("Failed to play audio cue preview", err);
+    }
   };
 
   const handlePlayingAudioHandlingChange = (value: string | null) => {
@@ -376,6 +415,54 @@ export function UiSettings({
             color="gray"
             size="md"
           />
+        </div>
+      </div>
+
+      <div className="settings-row">
+        <div>
+          <p className="settings-label">Sound cue</p>
+          <p className="settings-description">
+            Choose which sound plays when recording starts and stops
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Tooltip label="Preview (start + stop)" withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              disabled={isLoading}
+              onMouseDown={(e) => {
+                // Prevent focusing/opening the select when clicking the button.
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={handlePreviewAudioCue}
+            >
+              <Play size={14} style={{ opacity: 0.65 }} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip
+            label={GLOBAL_ONLY_TOOLTIP}
+            disabled={!isProfileScope}
+            withArrow
+          >
+            <Select
+              data={AUDIO_CUE_OPTIONS}
+              value={audioCueDropdownValue}
+              onChange={handleAudioCueChange}
+              disabled={isLoading || isProfileScope}
+              withCheckIcon={false}
+              styles={{
+                input: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-primary)",
+                  minWidth: 180,
+                },
+              }}
+            />
+          </Tooltip>
         </div>
       </div>
 
@@ -654,16 +741,71 @@ export function UiSettings({
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Tooltip
-            label="This setting can only be changed in the Default profile"
-            disabled={!isProfileScope}
-            withArrow
-          >
+          {isProfileScope ? (
+            <Tooltip label={GLOBAL_ONLY_TOOLTIP} withArrow position="top-start">
+              <div style={{ opacity: 0.5, cursor: "not-allowed" }}>
+                <div style={{ pointerEvents: "none" }}>
+                  <Select
+                    data={ACCENT_COLOR_OPTIONS}
+                    value={accentDropdownValue}
+                    onChange={handleAccentColorChange}
+                    disabled={true}
+                    withCheckIcon={false}
+                    leftSection={
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: 999,
+                          backgroundColor: getAccentSwatch(accentDropdownValue),
+                          boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.18)",
+                          display: "inline-block",
+                        }}
+                      />
+                    }
+                    leftSectionPointerEvents="none"
+                    renderOption={({ option }) => (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                        }}
+                      >
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: 999,
+                            backgroundColor: getAccentSwatch(option.value),
+                            boxShadow: "0 0 0 1px rgba(255, 255, 255, 0.18)",
+                            display: "inline-block",
+                            flex: "0 0 auto",
+                          }}
+                        />
+                        <span>{option.label}</span>
+                      </div>
+                    )}
+                    styles={{
+                      input: {
+                        backgroundColor: "var(--bg-elevated)",
+                        borderColor: "var(--border-default)",
+                        color: "var(--text-primary)",
+                        minWidth: 180,
+                      },
+                    }}
+                  />
+                </div>
+              </div>
+            </Tooltip>
+          ) : (
             <Select
               data={ACCENT_COLOR_OPTIONS}
               value={accentDropdownValue}
               onChange={handleAccentColorChange}
-              disabled={isLoading || isProfileScope}
+              disabled={isLoading}
               withCheckIcon={false}
               leftSection={
                 <span
@@ -705,7 +847,7 @@ export function UiSettings({
                 },
               }}
             />
-          </Tooltip>
+          )}
         </div>
       </div>
     </>

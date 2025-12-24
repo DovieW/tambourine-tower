@@ -7,6 +7,7 @@ import {
   type HotkeyConfig,
   llmAPI,
   logsAPI,
+  type AudioCue,
   type OutputMode,
   type PlayingAudioHandling,
   type RewriteProgramPromptProfile,
@@ -164,6 +165,16 @@ export function useUpdateSoundEnabled() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (enabled: boolean) => tauriAPI.updateSoundEnabled(enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+}
+
+export function useUpdateAudioCue() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (cue: AudioCue) => tauriAPI.updateAudioCue(cue),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },

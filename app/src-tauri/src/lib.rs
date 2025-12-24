@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -341,6 +342,7 @@ fn start_recording(
     app: &AppHandle,
     state: &AppState,
     sound_enabled: bool,
+    audio_cue: audio::AudioCue,
     audio_mute_manager: &Option<tauri::State<'_, AudioMuteManager>>,
     playing_audio_handling: PlayingAudioHandling,
     source: &str,
@@ -388,6 +390,33 @@ fn start_recording(
     // Pipeline started successfully - now update state and do side effects
     state.is_recording.store(true, Ordering::SeqCst);
 
+    // Start the recording chime ASAP.
+    // Showing/snapping the overlay window can be a bit slow on some systems (monitor queries,
+    // position math, window show), so we kick off audio playback *before* that work.
+    //
+    // If we're about to mute system audio, defer the mute until the cue has finished playing,
+    // but do so off-thread so the overlay can appear immediately.
+    if sound_enabled {
+        if playing_audio_handling.wants_mute() {
+            let app_for_audio = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = audio::play_sound_blocking(audio::SoundType::RecordingStart, audio_cue)
+                {
+                    log::warn!("Failed to play start sound: {}", e);
+                }
+
+                if let Some(manager) = app_for_audio.try_state::<AudioMuteManager>() {
+                    if let Err(e) = manager.mute() {
+                        log::warn!("Failed to mute audio: {}", e);
+                    }
+                }
+            });
+        } else {
+            // No immediate mute: play asynchronously to keep the UI responsive.
+            audio::play_sound(audio::SoundType::RecordingStart, audio_cue);
+        }
+    }
+
     // Show overlay if in "recording_only" mode
     let overlay_mode: String =
         get_setting_from_store(app, "overlay_mode", "recording_only".to_string());
@@ -395,14 +424,35 @@ fn start_recording(
         let _ = commands::overlay::show_overlay_with_reset_if_not_always(app);
     }
 
-    // Play sound BEFORE muting so it's audible
-    if sound_enabled {
-        audio::play_sound(audio::SoundType::RecordingStart);
-        // Brief delay to let sound play before muting
-        std::thread::sleep(std::time::Duration::from_millis(150));
+    // Prime the overlay waveform immediately. The background publisher loop will follow up
+    // with real levels as soon as the first CPAL callback arrives.
+    //
+    // This also helps when the overlay is shown at start: the listener may not yet be
+    // registered when the very first publisher tick runs.
+    {
+        let payload = serde_json::json!({
+            "seq": 0,
+            "rms": 0.0,
+            "peak": 0.0,
+            "wave_seq": 0,
+            "mins": Vec::<f32>::new(),
+            "maxes": Vec::<f32>::new(),
+        });
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            let _ = overlay.emit("overlay-audio-level", payload);
+        } else {
+            let _ = app.emit("overlay-audio-level", payload);
+        }
     }
-    // Mute system audio if enabled
-    if playing_audio_handling.wants_mute() {
+
+    // Notify frontend ASAP so the overlay can update/animate without waiting for
+    // audio side-effects (which may block, e.g. when we ensure the cue finishes
+    // before muting system audio).
+    let _ = app.emit("recording-start", ());
+
+    // Mute system audio if enabled.
+    // If sound is enabled, mute is deferred until after the cue finishes (see above).
+    if playing_audio_handling.wants_mute() && !sound_enabled {
         if let Some(manager) = audio_mute_manager {
             if let Err(e) = manager.mute() {
                 log::warn!("Failed to mute audio: {}", e);
@@ -437,7 +487,6 @@ fn start_recording(
         state.play_pause_toggled.store(false, Ordering::SeqCst);
     }
 
-    let _ = app.emit("recording-start", ());
 }
 
 /// Stop recording with sound and audio unmute handling
@@ -446,6 +495,7 @@ fn stop_recording(
     app: &AppHandle,
     state: &AppState,
     sound_enabled: bool,
+    audio_cue: audio::AudioCue,
     audio_mute_manager: &Option<tauri::State<'_, AudioMuteManager>>,
     playing_audio_handling: PlayingAudioHandling,
     source: &str,
@@ -453,6 +503,14 @@ fn stop_recording(
     state.is_recording.store(false, Ordering::SeqCst);
     log::info!("{}: stopping recording", source);
     emit_system_event(app, "shortcut", &format!("{}: stopping recording", source), None);
+
+    // If hallucination protection (quiet-audio gate) is enabled and the recording is considered
+    // effectively quiet, the pipeline will skip STT and immediately return to Idle.
+    // In that case, playing the stop sound is misleading, so we only play it if we actually
+    // enter Transcribing/Rewriting.
+    let quiet_audio_gate_enabled: bool =
+        get_setting_from_store(app, "quiet_audio_gate_enabled", true);
+    let play_stop_sound_when_transcribing = sound_enabled && quiet_audio_gate_enabled;
 
     // Keep Escape-to-cancel enabled during the transcription phase too.
     set_escape_cancel_shortcut_enabled(app, true);
@@ -464,8 +522,9 @@ fn stop_recording(
             }
         }
     }
-    if sound_enabled {
-        audio::play_sound(audio::SoundType::RecordingStop);
+    // If the quiet-audio gate is disabled, play the stop sound immediately as before.
+    if sound_enabled && !quiet_audio_gate_enabled {
+        audio::play_sound(audio::SoundType::RecordingStop, audio_cue);
     }
 
     // Resume playing audio if we previously toggled it.
@@ -521,6 +580,8 @@ fn stop_recording(
             {
                 let app_for_evt = app_clone.clone();
                 let pipeline_for_evt = pipeline_clone.clone();
+                let audio_cue_for_stop = audio_cue;
+                let should_play_stop_sound = play_stop_sound_when_transcribing;
                 tauri::async_runtime::spawn(async move {
                     let start = std::time::Instant::now();
                     loop {
@@ -528,6 +589,13 @@ fn stop_recording(
                             pipeline::PipelineState::Transcribing
                             | pipeline::PipelineState::Rewriting => {
                                 let _ = app_for_evt.emit("pipeline-transcription-started", ());
+
+                                if should_play_stop_sound {
+                                    crate::audio::play_sound(
+                                        crate::audio::SoundType::RecordingStop,
+                                        audio_cue_for_stop,
+                                    );
+                                }
                                 break;
                             }
                             pipeline::PipelineState::Idle | pipeline::PipelineState::Error => {
@@ -893,7 +961,10 @@ pub(crate) fn cancel_pipeline_session(app: &AppHandle, source: &str) {
     }
 
     if sound_enabled {
-        audio::play_sound(audio::SoundType::RecordingStop);
+        let audio_cue_raw: String =
+            get_setting_from_store(app, "audio_cue", "tangerine".to_string());
+        let audio_cue = audio::AudioCue::from_str(&audio_cue_raw);
+        audio::play_sound(audio::SoundType::RecordingStop, audio_cue);
     }
 
     // Cancel request log
@@ -955,6 +1026,8 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
 
     // Get current settings from store
     let sound_enabled: bool = get_setting_from_store(app, "sound_enabled", true);
+    let audio_cue_raw: String = get_setting_from_store(app, "audio_cue", "tangerine".to_string());
+    let audio_cue = audio::AudioCue::from_str(&audio_cue_raw);
     let playing_audio_handling: PlayingAudioHandling = get_playing_audio_handling(app);
 
     // Get shortcut string for comparison (normalized to handle "ctrl" vs "control" differences)
@@ -1019,6 +1092,7 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
                             app,
                             &state,
                             sound_enabled,
+                            audio_cue,
                             &audio_mute_manager,
                             playing_audio_handling,
                             "Toggle",
@@ -1028,6 +1102,7 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
                             app,
                             &state,
                             sound_enabled,
+                            audio_cue,
                             &audio_mute_manager,
                             playing_audio_handling,
                             "Toggle",
@@ -1058,6 +1133,7 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
                             app,
                             &state,
                             sound_enabled,
+                            audio_cue,
                             &audio_mute_manager,
                             playing_audio_handling,
                             "Hold",
@@ -1078,6 +1154,7 @@ pub fn handle_shortcut_event(app: &AppHandle, shortcut: &Shortcut, event: &Short
                             app,
                             &state,
                             sound_enabled,
+                            audio_cue,
                             &audio_mute_manager,
                             playing_audio_handling,
                             "Hold",
@@ -1151,6 +1228,9 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            commands::audio::play_audio_cue_preview,
+            commands::audio::list_audio_input_devices,
+            commands::audio::get_default_audio_input_device_name,
             commands::text::type_text,
             commands::text::get_server_url,
             commands::settings::register_shortcuts,
@@ -1246,6 +1326,110 @@ pub fn run() {
             {
                 let pipeline = initialize_pipeline_from_settings(app.handle());
                 app.manage(pipeline);
+            }
+
+            // Backend-driven overlay waveform: publish realtime mic levels to the overlay.
+            // This avoids browser getUserMedia startup latency and stays aligned with the
+            // actual CPAL capture stream.
+            #[cfg(desktop)]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut last_seq: u64 = 0;
+                    let mut last_emit = Instant::now();
+                    let mut primed_this_recording = false;
+                    let mut last_priming_emit: Option<Instant> = None;
+
+                    loop {
+                        // 60Hz-ish. If this is too chatty we can reduce to 30Hz later.
+                        tokio::time::sleep(Duration::from_millis(16)).await;
+
+                        let Some(pipeline) = app_handle.try_state::<pipeline::SharedPipeline>() else {
+                            continue;
+                        };
+
+                        // Prefer a non-blocking state check: during pipeline start-up the
+                        // mutex may be held while CPAL capture already begins.
+                        //
+                        // If we can prove we're NOT recording, don't publish. Otherwise,
+                        // allow publishing once the meter seq starts moving.
+                        if let Some(state) = pipeline.try_state() {
+                            if state != pipeline::PipelineState::Recording {
+                                last_seq = 0;
+                                primed_this_recording = false;
+                                last_priming_emit = None;
+                                continue;
+                            }
+                        }
+
+                        // Read the latest snapshots without locking the pipeline.
+                        // Drive emission from the level meter so the overlay stays alive
+                        // even if waveform buckets are temporarily unavailable.
+                        let levels = pipeline.audio_level_snapshot_fast();
+
+                        // If the capture stream has started but we haven't seen a callback yet,
+                        // send a one-time "priming" event so the overlay can render immediately
+                        // (baseline waveform) instead of waiting for the first buffer.
+                        if levels.seq == 0 {
+                            // Haven't observed any callbacks yet.
+                            // Keep sending priming frames for a short while so the overlay
+                            // doesn't miss the first event if its listener registers late.
+                            let should_emit = match last_priming_emit {
+                                None => true,
+                                Some(t) => t.elapsed() >= Duration::from_millis(50),
+                            };
+                            if should_emit {
+                                last_priming_emit = Some(Instant::now());
+                                primed_this_recording = true;
+                                let payload = serde_json::json!({
+                                    "seq": 0,
+                                    "rms": 0.0,
+                                    "peak": 0.0,
+                                    "wave_seq": 0,
+                                    "mins": Vec::<f32>::new(),
+                                    "maxes": Vec::<f32>::new(),
+                                });
+                                if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                                    let _ = overlay.emit("overlay-audio-level", payload);
+                                } else {
+                                    let _ = app_handle.emit("overlay-audio-level", payload);
+                                }
+                            }
+                            continue;
+                        }
+
+                        if levels.seq == last_seq {
+                            continue;
+                        }
+                        last_seq = levels.seq;
+                        primed_this_recording = true;
+
+                        // Waveform buckets (may be all-zeros early or on some devices).
+                        let wave = pipeline.audio_waveform_snapshot_fast();
+
+                        // Throttle slightly if needed (defensive).
+                        if last_emit.elapsed() < Duration::from_millis(8) {
+                            continue;
+                        }
+                        last_emit = Instant::now();
+
+                        // Emit directly to the overlay window when available.
+                        // This avoids any ambiguity around app-wide vs window event targets.
+                        let payload = serde_json::json!({
+                            "seq": levels.seq,
+                            "rms": levels.rms,
+                            "peak": levels.peak,
+                            "wave_seq": wave.seq,
+                            "mins": wave.mins,
+                            "maxes": wave.maxes,
+                        });
+                        if let Some(overlay) = app_handle.get_webview_window("overlay") {
+                            let _ = overlay.emit("overlay-audio-level", payload);
+                        } else {
+                            let _ = app_handle.emit("overlay-audio-level", payload);
+                        }
+                    }
+                });
             }
 
             // Register shortcuts from store (now that store plugin is available)
@@ -1485,6 +1669,29 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
 
     // Read quiet-audio gate settings from store
     let default_pipeline_config = pipeline::PipelineConfig::default();
+
+    let sanitize_quiet_duration_secs = |v: f32, fallback: f32| -> f32 {
+        if !v.is_finite() {
+            return fallback;
+        }
+        // UI clamps to a small range; keep this defensive in case the store was edited.
+        if v < 0.0 {
+            return fallback;
+        }
+        v.min(30.0)
+    };
+
+    let sanitize_quiet_dbfs_threshold = |v: f32, fallback: f32| -> f32 {
+        if !v.is_finite() {
+            return fallback;
+        }
+        // dBFS thresholds should be negative. If the store contains 0 or a positive number,
+        // the quiet gate would (almost) always trigger.
+        if v > -1.0 {
+            return fallback;
+        }
+        v.clamp(-120.0, -1.0)
+    };
     let quiet_audio_gate_enabled: bool = get_setting_from_store(
         app,
         "quiet_audio_gate_enabled",
@@ -1503,6 +1710,17 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
     let quiet_audio_peak_dbfs_threshold: f32 = get_setting_from_store(
         app,
         "quiet_audio_peak_dbfs_threshold",
+        default_pipeline_config.quiet_audio_peak_dbfs_threshold,
+    );
+
+    let quiet_audio_min_duration_secs =
+        sanitize_quiet_duration_secs(quiet_audio_min_duration_secs, default_pipeline_config.quiet_audio_min_duration_secs);
+    let quiet_audio_rms_dbfs_threshold = sanitize_quiet_dbfs_threshold(
+        quiet_audio_rms_dbfs_threshold,
+        default_pipeline_config.quiet_audio_rms_dbfs_threshold,
+    );
+    let quiet_audio_peak_dbfs_threshold = sanitize_quiet_dbfs_threshold(
+        quiet_audio_peak_dbfs_threshold,
         default_pipeline_config.quiet_audio_peak_dbfs_threshold,
     );
 
@@ -1586,7 +1804,23 @@ fn initialize_pipeline_from_settings(app: &AppHandle) -> pipeline::SharedPipelin
         })
         .collect();
 
+    // Microphone selection (backend / CPAL).
+    // Historical key name is `selected_mic_id` (originally from browser deviceId).
+    // We now treat it as a CPAL device name for backend recording + overlay waveform.
+    let input_device_name: Option<String> = {
+        let raw: Option<String> = get_setting_from_store(app, "selected_mic_id", None);
+        raw.and_then(|s| {
+            let t = s.trim().to_string();
+            if t.is_empty() || t == "default" {
+                None
+            } else {
+                Some(t)
+            }
+        })
+    };
+
     let config = pipeline::PipelineConfig {
+        input_device_name,
         stt_provider,
         stt_api_key,
         stt_api_keys,

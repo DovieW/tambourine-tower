@@ -41,9 +41,9 @@ export function AudioSettings({
   const quietAudioMinDurationSecs =
     settings?.quiet_audio_min_duration_secs ?? 0.15;
   const quietAudioRmsDbfsThreshold =
-    settings?.quiet_audio_rms_dbfs_threshold ?? -50;
+    settings?.quiet_audio_rms_dbfs_threshold ?? -60;
   const quietAudioPeakDbfsThreshold =
-    settings?.quiet_audio_peak_dbfs_threshold ?? -40;
+    settings?.quiet_audio_peak_dbfs_threshold ?? -50;
 
   const noiseGateStrengthFromSettings = settings?.noise_gate_strength ?? 0;
   const [noiseGateStrengthDraft, setNoiseGateStrengthDraft] = useState<

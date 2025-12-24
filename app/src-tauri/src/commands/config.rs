@@ -433,6 +433,19 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
+    // Read selected input device name from store.
+    // NOTE: The frontend setting key is historically named `selected_mic_id`.
+    // For backend recording, we treat it as a CPAL device name.
+    let input_device_name: Option<String> = app
+        .store("settings.json")
+        .ok()
+        .and_then(|store| store.get("selected_mic_id"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .and_then(|s: String| {
+            let t = s.trim().to_string();
+            if t.is_empty() || t == "default" { None } else { Some(t) }
+        });
+
     // Read quiet-audio gate settings from store
     let default_pipeline_config = PipelineConfig::default();
     let quiet_audio_gate_enabled: bool = app
@@ -473,6 +486,7 @@ pub fn sync_pipeline_config(app: AppHandle) -> Result<(), String> {
     let noise_gate_strength: u8 = noise_gate_strength_raw.min(100) as u8;
 
     let config = PipelineConfig {
+        input_device_name,
         stt_provider: stt_provider.clone(),
         stt_api_key,
         stt_api_keys,

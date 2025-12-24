@@ -1,4 +1,5 @@
 import { Loader, Select } from "@mantine/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useSettings, useUpdateSelectedMic } from "../lib/queries";
 
@@ -17,22 +18,22 @@ export function DeviceSelector() {
   useEffect(() => {
     async function loadDevices() {
       try {
-        // Request permission first (needed to get device labels)
-        await navigator.mediaDevices.getUserMedia({ audio: true });
+        const [names, defaultName] = await Promise.all([
+          invoke<string[]>("list_audio_input_devices"),
+          invoke<string | null>("get_default_audio_input_device_name"),
+        ]);
 
-        const allDevices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = allDevices
-          .filter((device) => device.kind === "audioinput")
-          .map((device) => ({
-            deviceId: device.deviceId,
-            label: device.label || `Microphone ${device.deviceId.slice(0, 8)}`,
-          }));
+        const audioInputs = (names ?? []).map((name) => ({
+          deviceId: name,
+          label:
+            defaultName && name === defaultName ? `${name} (Default)` : name,
+        }));
 
         setDevices(audioInputs);
         setError(null);
       } catch (err) {
-        setError("Could not access microphones. Please grant permission.");
-        console.error("Failed to enumerate devices:", err);
+        setError("Could not list microphones from the backend.");
+        console.error("Failed to list backend microphones:", err);
       } finally {
         setIsLoading(false);
       }
@@ -40,18 +41,7 @@ export function DeviceSelector() {
 
     loadDevices();
 
-    // Listen for device changes
-    const handleDeviceChange = () => {
-      loadDevices();
-    };
-    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
-
-    return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        handleDeviceChange
-      );
-    };
+    return;
   }, []);
 
   const handleChange = (value: string | null) => {
@@ -71,7 +61,8 @@ export function DeviceSelector() {
   ];
 
   const disabled = isLoading || settingsLoading || Boolean(error);
-  const description = "Select which microphone to use for dictation";
+  const description =
+    "Select which microphone to use for dictation (and the overlay waveform)";
 
   // If settings already point to a specific mic id, ensure it exists in the Select
   // options even before enumeration completes, so the control doesn't appear blank.

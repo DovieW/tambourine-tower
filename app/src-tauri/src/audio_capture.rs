@@ -11,6 +11,7 @@ use cpal::SampleFormat;
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 
@@ -292,6 +293,159 @@ pub struct AudioLevelStats {
     pub peak: f32,
 }
 
+/// Realtime-safe snapshot of the most recent input level.
+///
+/// Updated by the CPAL input callback using atomics (no allocations, no event emission).
+#[derive(Debug, Clone, Copy)]
+pub struct AudioLevelSnapshot {
+    pub seq: u64,
+    /// Root-mean-square amplitude in [0, 1] for the most recent callback chunk.
+    pub rms: f32,
+    /// Peak (max abs) amplitude in [0, 1] for the most recent callback chunk.
+    pub peak: f32,
+}
+
+/// Number of min/max buckets sent to the overlay for waveform rendering.
+///
+/// Keep this modest: payload size is 2 * N floats per frame.
+pub const WAVEFORM_BINS: usize = 64;
+
+/// Realtime-safe snapshot of the most recent min/max waveform buckets.
+///
+/// `mins[i]` and `maxes[i]` are in [-1, 1] representing the min/max sample value
+/// for that bucket.
+#[derive(Debug, Clone)]
+pub struct AudioWaveformSnapshot {
+    pub seq: u64,
+    pub mins: Vec<f32>,
+    pub maxes: Vec<f32>,
+}
+
+/// A cheap-to-clone handle for reading realtime waveform buckets without needing
+/// to borrow the full `AudioCapture`.
+#[derive(Clone)]
+pub struct SharedAudioWaveformMeter {
+    inner: Arc<AudioWaveformMeter>,
+}
+
+impl SharedAudioWaveformMeter {
+    pub fn snapshot(&self) -> AudioWaveformSnapshot {
+        self.inner.snapshot()
+    }
+}
+
+/// A cheap-to-clone handle for reading realtime audio levels without needing to
+/// borrow the full `AudioCapture`.
+///
+/// This wrapper avoids exposing the internal `AudioLevelMeter` implementation.
+#[derive(Clone)]
+pub struct SharedAudioLevelMeter {
+    inner: Arc<AudioLevelMeter>,
+}
+
+impl SharedAudioLevelMeter {
+    pub fn snapshot(&self) -> AudioLevelSnapshot {
+        self.inner.snapshot()
+    }
+}
+
+#[derive(Debug)]
+struct AudioWaveformMeter {
+    seq: AtomicU64,
+    min_bits: [AtomicU32; WAVEFORM_BINS],
+    max_bits: [AtomicU32; WAVEFORM_BINS],
+}
+
+impl Default for AudioWaveformMeter {
+    fn default() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            min_bits: std::array::from_fn(|_| AtomicU32::new(0f32.to_bits())),
+            max_bits: std::array::from_fn(|_| AtomicU32::new(0f32.to_bits())),
+        }
+    }
+}
+
+impl AudioWaveformMeter {
+    fn snapshot(&self) -> AudioWaveformSnapshot {
+        let seq = self.seq.load(Ordering::Relaxed);
+        let mut mins = Vec::with_capacity(WAVEFORM_BINS);
+        let mut maxes = Vec::with_capacity(WAVEFORM_BINS);
+        for i in 0..WAVEFORM_BINS {
+            mins.push(f32::from_bits(self.min_bits[i].load(Ordering::Relaxed)));
+            maxes.push(f32::from_bits(self.max_bits[i].load(Ordering::Relaxed)));
+        }
+        AudioWaveformSnapshot { seq, mins, maxes }
+    }
+
+    fn update_from_f32_interleaved(&self, data: &[f32], channels: usize) {
+        let channels = channels.max(1);
+        let frames = data.len() / channels;
+        if frames == 0 {
+            return;
+        }
+
+        for bin in 0..WAVEFORM_BINS {
+            let start = (bin * frames) / WAVEFORM_BINS;
+            let end = ((bin + 1) * frames) / WAVEFORM_BINS;
+            if start >= end {
+                self.min_bits[bin].store(0f32.to_bits(), Ordering::Relaxed);
+                self.max_bits[bin].store(0f32.to_bits(), Ordering::Relaxed);
+                continue;
+            }
+
+            let mut min_v: f32 = 1.0;
+            let mut max_v: f32 = -1.0;
+
+            for frame in start..end {
+                let base = frame * channels;
+                let mut acc: f32 = 0.0;
+                for c in 0..channels {
+                    acc += data.get(base + c).copied().unwrap_or(0.0);
+                }
+                let s = (acc / channels as f32).clamp(-1.0, 1.0);
+                if s < min_v {
+                    min_v = s;
+                }
+                if s > max_v {
+                    max_v = s;
+                }
+            }
+
+            self.min_bits[bin].store(min_v.to_bits(), Ordering::Relaxed);
+            self.max_bits[bin].store(max_v.to_bits(), Ordering::Relaxed);
+        }
+
+        self.seq.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug, Default)]
+struct AudioLevelMeter {
+    seq: AtomicU64,
+    rms_bits: AtomicU32,
+    peak_bits: AtomicU32,
+}
+
+impl AudioLevelMeter {
+    fn snapshot(&self) -> AudioLevelSnapshot {
+        let seq = self.seq.load(Ordering::Relaxed);
+        let rms = f32::from_bits(self.rms_bits.load(Ordering::Relaxed));
+        let peak = f32::from_bits(self.peak_bits.load(Ordering::Relaxed));
+        AudioLevelSnapshot { seq, rms, peak }
+    }
+
+    fn update(&self, rms: f32, peak: f32) {
+        // Clamp to sane range and avoid NaNs propagating into the UI.
+        let rms = if rms.is_finite() { rms.clamp(0.0, 1.0) } else { 0.0 };
+        let peak = if peak.is_finite() { peak.clamp(0.0, 1.0) } else { 0.0 };
+
+        self.rms_bits.store(rms.to_bits(), Ordering::Relaxed);
+        self.peak_bits.store(peak.to_bits(), Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Commands sent to the audio capture thread
 enum CaptureCommand {
     Stop,
@@ -346,6 +500,12 @@ pub struct AudioCapture {
     sample_rate: u32,
     channels: u16,
     vad_config: VadAutoStopConfig,
+
+    // Most recent realtime level stats (for UI metering / overlay waveform).
+    level_meter: Arc<AudioLevelMeter>,
+
+    // Most recent realtime waveform buckets (for true waveform rendering).
+    waveform_meter: Arc<AudioWaveformMeter>,
 }
 
 impl AudioCapture {
@@ -357,6 +517,8 @@ impl AudioCapture {
             sample_rate: 44100,
             channels: 1,
             vad_config: VadAutoStopConfig::default(),
+            level_meter: Arc::new(AudioLevelMeter::default()),
+            waveform_meter: Arc::new(AudioWaveformMeter::default()),
         }
     }
 
@@ -368,6 +530,29 @@ impl AudioCapture {
             sample_rate: 44100,
             channels: 1,
             vad_config,
+            level_meter: Arc::new(AudioLevelMeter::default()),
+            waveform_meter: Arc::new(AudioWaveformMeter::default()),
+        }
+    }
+
+    /// Get the most recent realtime input level snapshot.
+    ///
+    /// This is updated continuously while recording (per CPAL callback). When not recording,
+    /// it returns the last observed values.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn level_snapshot(&self) -> AudioLevelSnapshot {
+        self.level_meter.snapshot()
+    }
+
+    pub fn shared_level_meter(&self) -> SharedAudioLevelMeter {
+        SharedAudioLevelMeter {
+            inner: self.level_meter.clone(),
+        }
+    }
+
+    pub fn shared_waveform_meter(&self) -> SharedAudioWaveformMeter {
+        SharedAudioWaveformMeter {
+            inner: self.waveform_meter.clone(),
         }
     }
 
@@ -382,19 +567,62 @@ impl AudioCapture {
         &self.vad_config
     }
 
-    /// Start recording audio from the default input device
+    /// Start recording audio from the default input device.
+    ///
+    /// Prefer `start_with_device_name` when you need to honor a user-selected mic.
     ///
     /// # Arguments
     /// * `max_duration_secs` - Maximum recording duration in seconds (for buffer sizing)
     pub fn start(&mut self, max_duration_secs: f32) -> Result<(), AudioCaptureError> {
+        self.start_with_device_name(max_duration_secs, None)
+    }
+
+    /// Start recording audio from a specific input device (by CPAL device name),
+    /// falling back to the system default if not found.
+    pub fn start_with_device_name(
+        &mut self,
+        max_duration_secs: f32,
+        input_device_name: Option<&str>,
+    ) -> Result<(), AudioCaptureError> {
         // Stop any existing recording
         self.stop();
 
         // Get device info first (on main thread)
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(AudioCaptureError::NoInputDevice)?;
+
+        let desired_name = input_device_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "default");
+
+        let mut selected: Option<cpal::Device> = None;
+        if let Some(name) = desired_name {
+            if let Ok(devices) = host.input_devices() {
+                for d in devices {
+                    let Ok(n) = d.name() else { continue };
+                    if n == name {
+                        selected = Some(d);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let device = match selected {
+            Some(d) => {
+                log::info!("Using selected input device: {}", desired_name.unwrap_or("<unknown>"));
+                d
+            }
+            None => {
+                if let Some(name) = desired_name {
+                    log::warn!(
+                        "Selected input device '{}' not found; falling back to default input device",
+                        name
+                    );
+                }
+                host.default_input_device()
+                    .ok_or(AudioCaptureError::NoInputDevice)?
+            }
+        };
 
         let config = device
             .default_input_config()
@@ -418,6 +646,8 @@ impl AudioCapture {
         )));
 
         let buffer_clone = self.buffer.clone();
+        let meter = self.level_meter.clone();
+        let waveform_meter = self.waveform_meter.clone();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let sample_format = config.sample_format();
@@ -432,6 +662,8 @@ impl AudioCapture {
                 stream_config,
                 sample_format,
                 buffer_clone,
+                meter,
+                waveform_meter,
                 command_rx,
                 event_tx,
                 vad_config,
@@ -577,6 +809,8 @@ fn run_capture_thread(
     config: cpal::StreamConfig,
     sample_format: SampleFormat,
     buffer: Arc<StdMutex<AudioBuffer>>,
+    meter: Arc<AudioLevelMeter>,
+    waveform_meter: Arc<AudioWaveformMeter>,
     command_rx: mpsc::Receiver<CaptureCommand>,
     event_tx: mpsc::Sender<AudioCaptureEvent>,
     vad_config: VadAutoStopConfig,
@@ -624,10 +858,31 @@ fn run_capture_thread(
     let stream = match sample_format {
         SampleFormat::F32 => {
             let buffer = buffer.clone();
+            let meter = meter.clone();
+            let waveform_meter = waveform_meter.clone();
             let vad_tx = if vad_config.enabled { Some(vad_samples_tx.clone()) } else { None };
+            let channels = config.channels as usize;
             device.build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    // Realtime meter (cheap math, no allocations).
+                    let mut peak: f32 = 0.0;
+                    let mut sum_sq: f64 = 0.0;
+                    let mut n: u64 = 0;
+                    for &s in data {
+                        let a = s.abs();
+                        if a > peak {
+                            peak = a;
+                        }
+                        sum_sq += (s as f64) * (s as f64);
+                        n += 1;
+                    }
+                    let rms = if n == 0 { 0.0 } else { (sum_sq / n as f64).sqrt() as f32 };
+                    meter.update(rms, peak);
+
+                    // True waveform buckets for UI.
+                    waveform_meter.update_from_f32_interleaved(data, channels);
+
                     // Store audio in buffer
                     if let Ok(mut buf) = buffer.lock() {
                         buf.append(data);
@@ -644,11 +899,33 @@ fn run_capture_thread(
         }
         SampleFormat::I16 => {
             let buffer = buffer.clone();
+            let meter = meter.clone();
+            let waveform_meter = waveform_meter.clone();
             let vad_tx = if vad_config.enabled { Some(vad_samples_tx.clone()) } else { None };
+            let channels = config.channels as usize;
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                    let mut peak: f32 = 0.0;
+                    let mut sum_sq: f64 = 0.0;
+                    let samples: Vec<f32> = data
+                        .iter()
+                        .map(|&s| {
+                            let f = s.to_float_sample();
+                            let a = f.abs();
+                            if a > peak {
+                                peak = a;
+                            }
+                            sum_sq += (f as f64) * (f as f64);
+                            f
+                        })
+                        .collect();
+                    let n = samples.len() as u64;
+                    let rms = if n == 0 { 0.0 } else { (sum_sq / n as f64).sqrt() as f32 };
+                    meter.update(rms, peak);
+
+                    // True waveform buckets for UI.
+                    waveform_meter.update_from_f32_interleaved(&samples, channels);
 
                     // Store audio in buffer
                     if let Ok(mut buf) = buffer.lock() {
@@ -666,11 +943,33 @@ fn run_capture_thread(
         }
         SampleFormat::U16 => {
             let buffer = buffer.clone();
+            let meter = meter.clone();
+            let waveform_meter = waveform_meter.clone();
             let vad_tx = if vad_config.enabled { Some(vad_samples_tx.clone()) } else { None };
+            let channels = config.channels as usize;
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f32> = data.iter().map(|&s| s.to_float_sample()).collect();
+                    let mut peak: f32 = 0.0;
+                    let mut sum_sq: f64 = 0.0;
+                    let samples: Vec<f32> = data
+                        .iter()
+                        .map(|&s| {
+                            let f = s.to_float_sample();
+                            let a = f.abs();
+                            if a > peak {
+                                peak = a;
+                            }
+                            sum_sq += (f as f64) * (f as f64);
+                            f
+                        })
+                        .collect();
+                    let n = samples.len() as u64;
+                    let rms = if n == 0 { 0.0 } else { (sum_sq / n as f64).sqrt() as f32 };
+                    meter.update(rms, peak);
+
+                    // True waveform buckets for UI.
+                    waveform_meter.update_from_f32_interleaved(&samples, channels);
 
                     // Store audio in buffer
                     if let Ok(mut buf) = buffer.lock() {
