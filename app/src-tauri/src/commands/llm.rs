@@ -49,6 +49,13 @@ pub struct TestLlmRewriteResponse {
     pub model_used: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct LlmCompleteResponse {
+    pub output: String,
+    pub provider_used: String,
+    pub model_used: String,
+}
+
 fn create_llm_provider(config: &LlmConfig) -> Arc<dyn LlmProvider> {
     match config.provider.as_str() {
         "anthropic" => {
@@ -311,6 +318,64 @@ pub async fn test_llm_rewrite(
 
     Ok(TestLlmRewriteResponse {
         output,
+        provider_used: provider.name().to_string(),
+        model_used: provider.model().to_string(),
+    })
+}
+
+/// Run a one-off LLM completion with explicit provider/model and explicit prompts.
+///
+/// This is used by the History UI to send analysis instructions as the *system prompt*
+/// and the transcript bundle as the *user prompt*.
+#[tauri::command]
+pub async fn llm_complete(
+    pipeline: State<'_, SharedPipeline>,
+    provider: String,
+    model: Option<String>,
+    system_prompt: String,
+    user_prompt: String,
+) -> Result<LlmCompleteResponse, LlmCommandError> {
+    let config = pipeline.config();
+
+    let desired_provider = provider;
+    let desired_model = model;
+
+    let api_key = if desired_provider == "ollama" {
+        String::new()
+    } else {
+        config
+            .llm_api_keys
+            .get(desired_provider.as_str())
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    if desired_provider != "ollama" && api_key.trim().is_empty() {
+        return Err(LlmCommandError::from(format!(
+            "No API key configured for provider: {}",
+            desired_provider
+        )));
+    }
+
+    let provider_cfg = LlmConfig {
+        enabled: true,
+        provider: desired_provider,
+        api_key,
+        model: desired_model,
+        ollama_url: config.llm_config.ollama_url.clone(),
+        prompts: PromptSections::default(),
+        program_prompt_profiles: Vec::new(),
+        timeout: config.llm_config.timeout,
+    };
+
+    let provider = create_llm_provider(&provider_cfg);
+    let output = provider
+        .complete(system_prompt.as_str(), user_prompt.as_str())
+        .await
+        .map_err(|e| LlmCommandError::from(e.to_string()))?;
+
+    Ok(LlmCompleteResponse {
+        output: output.trim().to_string(),
         provider_used: provider.name().to_string(),
         model_used: provider.model().to_string(),
     })

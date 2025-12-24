@@ -900,12 +900,41 @@ export interface TestLlmRewriteResponse {
   model_used: string;
 }
 
+export interface LlmProviderInfo {
+  id: string;
+  name: string;
+  requires_api_key: boolean;
+  default_model: string;
+  models: string[];
+}
+
+export interface LlmCompleteResponse {
+  output: string;
+  provider_used: string;
+  model_used: string;
+}
+
 export const llmAPI = {
+  getLlmProviders: () => invoke<LlmProviderInfo[]>("get_llm_providers"),
+
   testLlmRewrite: (params: { transcript: string; profileId?: string | null }) =>
     invoke<TestLlmRewriteResponse>("test_llm_rewrite", {
       transcript: params.transcript,
       // Rust param name is `profile_id`
       profile_id: params.profileId ?? null,
+    }),
+
+  complete: (params: {
+    provider: string;
+    model?: string | null;
+    systemPrompt: string;
+    userPrompt: string;
+  }) =>
+    invoke<LlmCompleteResponse>("llm_complete", {
+      provider: params.provider,
+      model: params.model ?? null,
+      system_prompt: params.systemPrompt,
+      user_prompt: params.userPrompt,
     }),
 };
 

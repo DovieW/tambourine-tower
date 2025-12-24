@@ -6,24 +6,30 @@ import {
   Checkbox,
   Collapse,
   Divider,
+  Drawer,
   Group,
   Indicator,
   Loader,
   Modal,
+  NumberInput,
   Popover,
   ScrollArea,
+  Select,
+  SegmentedControl,
   Stack,
   Switch,
   Text,
+  Textarea,
   TextInput,
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useClipboard, useDisclosure } from "@mantine/hooks";
-import { useQueryClient } from "@tanstack/react-query";
+import { useClipboard, useDisclosure, useMediaQuery } from "@mantine/hooks";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format, isToday, isYesterday } from "date-fns";
 import {
+  Bot,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -37,6 +43,7 @@ import {
   Play,
   RotateCcw,
   Search,
+  Send,
   Trash2,
   X,
 } from "lucide-react";
@@ -49,7 +56,12 @@ import {
   useRecordingsStats,
   useRetryTranscription,
 } from "../lib/queries";
-import { recordingsAPI, tauriAPI } from "../lib/tauri";
+import {
+  llmAPI,
+  recordingsAPI,
+  tauriAPI,
+  type LlmProviderInfo,
+} from "../lib/tauri";
 import { useRecordingPlayer } from "../lib/useRecordingPlayer";
 import { listAllLlmModelKeys, listAllSttModelKeys } from "../lib/modelOptions";
 
@@ -167,6 +179,159 @@ function groupHistoryByDate(
   return Object.values(groups);
 }
 
+function estimateTokenCount(text: string): number {
+  // Heuristic: ~4 characters per token for English-ish text.
+  // Good enough for an on-screen estimate.
+  const normalized = (text ?? "").trim();
+  if (!normalized) return 0;
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+type AnalysisPromptStyle = "productive" | "insightful" | "structured";
+
+function analysisStyleLabel(style: AnalysisPromptStyle): string {
+  switch (style) {
+    case "productive":
+      return "Productive";
+    case "insightful":
+      return "Insightful";
+    case "structured":
+      return "Structured";
+  }
+}
+
+function buildAnalysisSystemPrompt(style: AnalysisPromptStyle): string {
+  switch (style) {
+    case "productive":
+      return (
+        "You are an expert assistant. Analyze the following voice dictation transcripts." +
+        "\n\nGoals:" +
+        "\n- Identify recurring themes, priorities, open questions, and next actions." +
+        "\n- Produce a concise summary and a structured list of action items." +
+        "\n- Call out contradictions, missing context, and risks." +
+        "\n\nOutput format:" +
+        "\n1) Executive summary (5-10 bullets)" +
+        "\n2) Themes (grouped)" +
+        "\n3) Action items (with suggested owners + priority)" +
+        "\n4) Open questions" +
+        "\n5) Notable quotes (optional)"
+      );
+    case "insightful":
+      return (
+        "You are an insightful analyst. Read the transcripts and infer intent, context, and patterns." +
+        "\n\nFocus:" +
+        "\n- Hidden assumptions and recurring frustrations" +
+        "\n- Opportunities, risks, and what to do next" +
+        "\n- What seems important but unstated" +
+        "\n\nOutput format:" +
+        "\n1) Key insights (bullets)" +
+        "\n2) Themes & evidence (quotes or references)" +
+        "\n3) Recommendations" +
+        "\n4) Open questions"
+      );
+    case "structured":
+      return (
+        "You are a meticulous organizer. Turn these transcripts into a clean plan." +
+        "\n\nRules:" +
+        "\n- Be concise." +
+        "\n- Use headings and bullet lists." +
+        "\n- Prefer concrete next steps." +
+        "\n\nOutput format:" +
+        "\n## Summary" +
+        "\n## Goals" +
+        "\n## Tasks (priority-ordered)" +
+        "\n## Decisions needed" +
+        "\n## Questions"
+      );
+  }
+}
+
+function buildTranscriptsUserPrompt(args: {
+  transcripts: Array<{ timestamp: string; text: string }>;
+}): string {
+  const lines: string[] = [];
+  lines.push("---\nTRANSCRIPTS\n---");
+  args.transcripts.forEach((entry, idx) => {
+    const ts = format(new Date(entry.timestamp), "yyyy-MM-dd HH:mm");
+    lines.push(`\n[Recording ${idx + 1} • ${ts}]\n${entry.text}`);
+  });
+  return lines.join("\n");
+}
+
+function buildAnalysisPrompt(
+  history: Array<{
+    id: string;
+    text: string;
+    timestamp: string;
+    status?: "in_progress" | "success" | "error";
+  }>,
+  options?: {
+    includeFromLastHours?: number | null;
+    style?: AnalysisPromptStyle;
+  }
+): {
+  prompt: string;
+  systemPrompt: string;
+  userPrompt: string;
+  includedCount: number;
+  totalCount: number;
+  availableTranscriptsCount: number;
+} {
+  const totalCount = history.length;
+  const style: AnalysisPromptStyle = options?.style ?? "productive";
+
+  const allTranscripts = history
+    .filter((e) => (e.status ?? "success") === "success")
+    .map((e) => ({ ...e, text: (e.text ?? "").trim() }))
+    .filter((e) => e.text.length > 0);
+
+  const availableTranscriptsCount = allTranscripts.length;
+
+  const includeFromLastHours = options?.includeFromLastHours;
+  const cutoffMs =
+    typeof includeFromLastHours === "number" &&
+    Number.isFinite(includeFromLastHours) &&
+    includeFromLastHours > 0
+      ? Date.now() - includeFromLastHours * 60 * 60 * 1000
+      : null;
+
+  const filtered =
+    typeof cutoffMs === "number"
+      ? allTranscripts.filter(
+          (t) => new Date(t.timestamp).getTime() >= cutoffMs
+        )
+      : allTranscripts;
+
+  const transcripts = [...filtered].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+
+  const includedCount = transcripts.length;
+  const systemPrompt = buildAnalysisSystemPrompt(style);
+  const userPrompt = buildTranscriptsUserPrompt({
+    transcripts: transcripts.map((t) => ({
+      timestamp: t.timestamp,
+      text: t.text,
+    })),
+  });
+
+  const promptParts = [systemPrompt, userPrompt];
+  if (includedCount === 0) {
+    promptParts.push(
+      "(No non-empty transcripts matched your filter. Record something first, then try again.)"
+    );
+  }
+
+  return {
+    prompt: promptParts.join("\n\n"),
+    systemPrompt,
+    userPrompt,
+    includedCount,
+    totalCount,
+    availableTranscriptsCount,
+  };
+}
+
 export function HistoryFeed() {
   const queryClient = useQueryClient();
   const { data: history, isLoading, error } = useHistory();
@@ -193,6 +358,7 @@ export function HistoryFeed() {
   });
   const [confirmOpened, { open: openConfirm, close: closeConfirm }] =
     useDisclosure(false);
+  const [analysisOpened, analysisHandlers] = useDisclosure(false);
   const [filtersOpened, filtersHandlers] = useDisclosure(false);
   const [sttExpanded, setSttExpanded] = useState(false);
   const [llmExpanded, setLlmExpanded] = useState(false);
@@ -206,6 +372,59 @@ export function HistoryFeed() {
   );
   const [selectedLlmModelKeys, setSelectedLlmModelKeys] = useState<string[]>(
     []
+  );
+
+  const [analysisPrompt, setAnalysisPrompt] = useState<string>("");
+  const [analysisSystemPrompt, setAnalysisSystemPrompt] = useState<string>("");
+  const [analysisUserPrompt, setAnalysisUserPrompt] = useState<string>("");
+  const [analysisIncludedCount, setAnalysisIncludedCount] = useState(0);
+  const [analysisTotalCount, setAnalysisTotalCount] = useState(0);
+  const [
+    analysisAvailableTranscriptsCount,
+    setAnalysisAvailableTranscriptsCount,
+  ] = useState(0);
+  const [
+    analysisIncludeFromLastHoursInput,
+    setAnalysisIncludeFromLastHoursInput,
+  ] = useState<string | number>("");
+  const [analysisPromptStyle, setAnalysisPromptStyle] =
+    useState<AnalysisPromptStyle>("productive");
+
+  const [sendDrawerOpened, sendDrawerHandlers] = useDisclosure(false);
+  const isNarrow = useMediaQuery("(max-width: 900px)");
+
+  const { data: llmProviders } = useQuery({
+    queryKey: ["llmProviders"],
+    queryFn: () => llmAPI.getLlmProviders(),
+    staleTime: 60_000,
+  });
+
+  const hasAnyLlmProviders = (llmProviders?.length ?? 0) > 0;
+
+  const [sendProvider, setSendProvider] = useState<string | null>(null);
+  const [sendModel, setSendModel] = useState<string | null>(null);
+  const [sendOutput, setSendOutput] = useState<string>("");
+  const [sendProviderUsed, setSendProviderUsed] = useState<string>("");
+  const [sendModelUsed, setSendModelUsed] = useState<string>("");
+
+  const sendToLlmMutation = useMutation({
+    mutationFn: async (args: {
+      provider: string;
+      model: string | null;
+      systemPrompt: string;
+      userPrompt: string;
+    }) =>
+      llmAPI.complete({
+        provider: args.provider,
+        model: args.model,
+        systemPrompt: args.systemPrompt,
+        userPrompt: args.userPrompt,
+      }),
+  });
+
+  const analysisEstimatedTokens = useMemo(
+    () => estimateTokenCount(analysisPrompt),
+    [analysisPrompt]
   );
 
   // Persist history filters (UI-only) across app restarts.
@@ -317,6 +536,35 @@ export function HistoryFeed() {
         color: "red",
       });
     }
+  };
+
+  const handleGenerateAnalysisPrompt = () => {
+    const parsedHours =
+      typeof analysisIncludeFromLastHoursInput === "number"
+        ? analysisIncludeFromLastHoursInput
+        : analysisIncludeFromLastHoursInput.trim().length > 0
+        ? Number.parseFloat(analysisIncludeFromLastHoursInput)
+        : NaN;
+    const includeFromLastHours =
+      Number.isFinite(parsedHours) && parsedHours > 0 ? parsedHours : null;
+
+    const {
+      prompt,
+      systemPrompt,
+      userPrompt,
+      includedCount,
+      totalCount,
+      availableTranscriptsCount,
+    } = buildAnalysisPrompt(history ?? [], {
+      includeFromLastHours,
+      style: analysisPromptStyle,
+    });
+    setAnalysisPrompt(prompt);
+    setAnalysisSystemPrompt(systemPrompt);
+    setAnalysisUserPrompt(userPrompt);
+    setAnalysisIncludedCount(includedCount);
+    setAnalysisTotalCount(totalCount);
+    setAnalysisAvailableTranscriptsCount(availableTranscriptsCount);
   };
 
   const sttModelUsageCounts = useMemo(() => {
@@ -523,20 +771,6 @@ export function HistoryFeed() {
       <div className="section-header">
         <span className="section-title section-title--no-accent">History</span>
         <Group gap={6}>
-          <Tooltip label="Clear all history" withArrow>
-            <span style={{ display: "inline-block" }}>
-              <Button
-                variant="subtle"
-                size="compact-sm"
-                color="gray"
-                onClick={openConfirm}
-                disabled={clearHistory.isPending}
-              >
-                Clear All
-              </Button>
-            </span>
-          </Tooltip>
-
           <Tooltip
             label={
               recordingsStats.isLoading || recordingsGbForTooltip === null
@@ -556,6 +790,35 @@ export function HistoryFeed() {
               aria-label="Open recordings folder"
             >
               <FolderOpen size={14} />
+            </Button>
+          </Tooltip>
+
+          <Tooltip label="Analyze transcripts" withArrow>
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              color="gray"
+              px={6}
+              onClick={() => {
+                analysisHandlers.open();
+              }}
+              aria-label="Analyze transcripts"
+            >
+              <Bot size={14} />
+            </Button>
+          </Tooltip>
+
+          <Tooltip label="Clear all history" withArrow>
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              color="red"
+              px={6}
+              onClick={openConfirm}
+              disabled={clearHistory.isPending}
+              aria-label="Clear all history"
+            >
+              <Trash2 size={14} />
             </Button>
           </Tooltip>
         </Group>
@@ -934,6 +1197,326 @@ export function HistoryFeed() {
           </Button>
         </Group>
       </Modal>
+
+      <Modal
+        opened={analysisOpened}
+        onClose={analysisHandlers.close}
+        title="Analyze transcripts"
+        centered
+        size="lg"
+      >
+        <Text size="sm" c="dimmed" mb="sm">
+          Build a prompt from your saved transcripts, then copy it or send it to
+          a provider.
+        </Text>
+
+        <Box
+          mb="sm"
+          style={{
+            border: "1px solid var(--border-default)",
+            borderRadius: 10,
+            padding: 10,
+            background: "var(--bg-elevated)",
+          }}
+        >
+          <Group justify="space-between" align="center" wrap="wrap" gap={10}>
+            <Group gap={6}>
+              <Badge size="sm" variant="light" color="gray">
+                {analysisIncludedCount} transcript
+                {analysisIncludedCount === 1 ? "" : "s"}
+              </Badge>
+              <Badge size="sm" variant="light" color="gray">
+                ~{analysisEstimatedTokens.toLocaleString()} tokens
+              </Badge>
+              {analysisAvailableTranscriptsCount > 0 ? (
+                <Badge size="sm" variant="light" color="gray">
+                  {analysisAvailableTranscriptsCount} with transcripts
+                </Badge>
+              ) : null}
+            </Group>
+
+            <Group gap={8} wrap="wrap" align="center">
+              <NumberInput
+                value={analysisIncludeFromLastHoursInput}
+                onChange={setAnalysisIncludeFromLastHoursInput}
+                placeholder="All time"
+                min={0}
+                step={0.5}
+                hideControls
+                decimalScale={2}
+                allowNegative={false}
+                size="xs"
+                w={140}
+                leftSection={
+                  <Text size="xs" c="dimmed">
+                    hrs
+                  </Text>
+                }
+                styles={{
+                  input: {
+                    backgroundColor: "transparent",
+                    borderColor: "var(--border-default)",
+                    color: "var(--text-primary)",
+                  },
+                }}
+              />
+
+              <SegmentedControl
+                size="xs"
+                value={analysisPromptStyle}
+                onChange={(v) =>
+                  setAnalysisPromptStyle(v as AnalysisPromptStyle)
+                }
+                data={(["productive", "insightful", "structured"] as const).map(
+                  (style) => ({
+                    value: style,
+                    label: analysisStyleLabel(style),
+                  })
+                )}
+                styles={{
+                  root: {
+                    backgroundColor: "transparent",
+                    border: "1px solid var(--border-default)",
+                  },
+                  label: { color: "var(--text-primary)" },
+                }}
+              />
+
+              <Button
+                size="xs"
+                color="orange"
+                onClick={handleGenerateAnalysisPrompt}
+              >
+                Generate
+              </Button>
+
+              <Tooltip label="Copy prompt" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => clipboard.copy(analysisPrompt)}
+                  disabled={analysisPrompt.trim().length === 0}
+                  aria-label="Copy prompt"
+                >
+                  <Copy size={16} />
+                </ActionIcon>
+              </Tooltip>
+
+              <Tooltip
+                label={
+                  hasAnyLlmProviders
+                    ? "Send to LLM"
+                    : "No LLM providers are configured"
+                }
+                withArrow
+              >
+                <span style={{ display: "inline-flex" }}>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    disabled={!hasAnyLlmProviders}
+                    aria-label="Send to LLM"
+                    onClick={() => {
+                      // Ensure prompts are populated for sending.
+                      if (!analysisSystemPrompt || !analysisUserPrompt) {
+                        handleGenerateAnalysisPrompt();
+                      }
+
+                      sendDrawerHandlers.open();
+
+                      const firstProvider = (llmProviders ?? [])[0];
+                      setSendProvider(
+                        (current) => current ?? firstProvider?.id ?? null
+                      );
+                      setSendModel((current) => {
+                        if (current) return current;
+                        if (!firstProvider) return null;
+                        return (
+                          firstProvider.default_model ??
+                          firstProvider.models?.[0] ??
+                          null
+                        );
+                      });
+                    }}
+                  >
+                    <Send size={16} />
+                  </ActionIcon>
+                </span>
+              </Tooltip>
+            </Group>
+          </Group>
+        </Box>
+
+        <Textarea
+          value={analysisPrompt}
+          onChange={(e) => setAnalysisPrompt(e.currentTarget.value)}
+          placeholder="Click Generate to create a prompt. Then copy it or send it to a provider."
+          styles={{
+            input: {
+              backgroundColor: "var(--bg-elevated)",
+              borderColor: "var(--border-default)",
+              color: "var(--text-primary)",
+              fontFamily: "monospace",
+              fontSize: "13px",
+              height: 360,
+              overflowY: "auto",
+              resize: "none",
+            },
+          }}
+        />
+      </Modal>
+
+      <Drawer
+        opened={sendDrawerOpened}
+        onClose={sendDrawerHandlers.close}
+        title="Send to LLM"
+        position={isNarrow ? "bottom" : "right"}
+        size={isNarrow ? "70%" : 460}
+      >
+        <Stack gap="sm">
+          <Group grow>
+            <Select
+              label="Provider"
+              placeholder="Select provider"
+              data={(llmProviders ?? []).map((p: LlmProviderInfo) => ({
+                value: p.id,
+                label: p.name,
+              }))}
+              value={sendProvider}
+              onChange={(v) => {
+                setSendProvider(v);
+                const p = (llmProviders ?? []).find((x) => x.id === v);
+                setSendModel(p?.default_model ?? p?.models?.[0] ?? null);
+              }}
+              styles={{
+                input: {
+                  backgroundColor: "transparent",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-primary)",
+                },
+                dropdown: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                },
+              }}
+            />
+
+            <Select
+              label="Model"
+              placeholder="Select model"
+              data={(() => {
+                const p = (llmProviders ?? []).find(
+                  (x) => x.id === sendProvider
+                );
+                return (p?.models ?? []).map((m) => ({ value: m, label: m }));
+              })()}
+              value={sendModel}
+              onChange={(v) => setSendModel(v)}
+              searchable
+              styles={{
+                input: {
+                  backgroundColor: "transparent",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-primary)",
+                },
+                dropdown: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                },
+              }}
+            />
+          </Group>
+
+          <Group justify="space-between" align="center">
+            <Text size="xs" c="dimmed">
+              {sendProviderUsed && sendModelUsed
+                ? `Used: ${sendProviderUsed} • ${sendModelUsed}`
+                : ""}
+            </Text>
+
+            <Group gap={8}>
+              <Button
+                variant="light"
+                color="gray"
+                loading={sendToLlmMutation.isPending}
+                onClick={async () => {
+                  const provider = sendProvider ?? "";
+                  if (!provider) {
+                    notifications.show({
+                      title: "Send to LLM",
+                      message: "Select a provider.",
+                      color: "red",
+                    });
+                    return;
+                  }
+
+                  if (!analysisSystemPrompt || !analysisUserPrompt) {
+                    handleGenerateAnalysisPrompt();
+                  }
+
+                  if (!analysisUserPrompt.trim()) {
+                    notifications.show({
+                      title: "Send to LLM",
+                      message:
+                        "No transcripts matched the filter. Try a larger hour window, or record more.",
+                      color: "red",
+                    });
+                    return;
+                  }
+
+                  try {
+                    const res = await sendToLlmMutation.mutateAsync({
+                      provider,
+                      model: sendModel ?? null,
+                      systemPrompt: analysisSystemPrompt,
+                      userPrompt: analysisUserPrompt,
+                    });
+                    setSendOutput(res.output);
+                    setSendProviderUsed(res.provider_used);
+                    setSendModelUsed(res.model_used);
+                  } catch (e) {
+                    notifications.show({
+                      title: "Send to LLM",
+                      message: String(e),
+                      color: "red",
+                    });
+                  }
+                }}
+              >
+                Generate
+              </Button>
+
+              <Button
+                variant="subtle"
+                color="gray"
+                leftSection={<Copy size={14} />}
+                onClick={() => clipboard.copy(sendOutput)}
+                disabled={sendOutput.trim().length === 0}
+              >
+                Copy
+              </Button>
+            </Group>
+          </Group>
+
+          <Textarea
+            value={sendOutput}
+            onChange={(e) => setSendOutput(e.currentTarget.value)}
+            placeholder="LLM output will appear here…"
+            styles={{
+              input: {
+                backgroundColor: "var(--bg-elevated)",
+                borderColor: "var(--border-default)",
+                color: "var(--text-primary)",
+                fontFamily: "monospace",
+                fontSize: "13px",
+                height: 300,
+                overflowY: "auto",
+                resize: "none",
+              },
+            }}
+          />
+        </Stack>
+      </Drawer>
 
       {filteredHistory.length === 0 ? (
         <div className="empty-state">
