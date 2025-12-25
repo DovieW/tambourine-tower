@@ -132,15 +132,6 @@ body {
 	opacity: 0.9;
 }
 
-.overlay-pill--close:hover {
-	opacity: 1;
-	background: rgba(255, 255, 255, 0.08);
-}
-
-.overlay-button:hover {
-	background: rgba(20, 20, 20, 0.9);
-}
-
 .overlay-button:disabled {
 	/*
 	 * When the overlay is busy (transcribing/rewriting) we disable the button to
@@ -158,11 +149,6 @@ body {
 	flex: 0 0 auto;
 	border-radius: 12px;
 	background: rgba(255, 255, 255, 0.06);
-}
-
-/* Tiny accent ring on hover to match the main app styling language. */
-.overlay-button:hover .overlay-icon {
-	box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
 .overlay-dot {
@@ -282,7 +268,6 @@ body {
 }
 
 /* Allow reading the full error without tooltips (tooltips are hidden in overlay). */
-.overlay-error-text:hover,
 .overlay-error-text:focus {
 	overflow-x: auto;
 	text-overflow: clip;
@@ -309,11 +294,6 @@ body {
 
 .overlay-wave--arming {
 	opacity: 0.60;
-}
-
-/* Waveform gets a tiny Tangerine glow only on hover (no always-on frame). */
-.overlay-button:hover .overlay-wave {
-	filter: drop-shadow(0 0 10px rgba(var(--accent-rgb) / 0.18));
 }
 
 /* Hide tooltips/popups in overlay - use high specificity instead of !important */

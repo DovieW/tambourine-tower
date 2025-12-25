@@ -2000,10 +2000,6 @@ function RecordingControl() {
                     className="overlay-error-text"
                     title={lastError.message}
                     tabIndex={0}
-                    onMouseEnter={(e) => {
-                      // Ensure we show the beginning of the message (not a scrolled midpoint).
-                      e.currentTarget.scrollLeft = 0;
-                    }}
                     onFocus={(e) => {
                       e.currentTarget.scrollLeft = 0;
                     }}
