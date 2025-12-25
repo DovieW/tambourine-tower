@@ -9,8 +9,16 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
-import { Cog, FileText, Home, Plus, Settings } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  CircleHelp,
+  Cog,
+  FileText,
+  Home,
+  Plus,
+  Settings,
+  Sparkles,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { HistoryFeed } from "./components/HistoryFeed";
 import { Logo } from "./components/Logo";
 import { LogsView } from "./components/LogsView";
@@ -22,6 +30,7 @@ import {
   ProfileConfigModal,
   UiSettings,
 } from "./components/settings";
+import { SettingsGuideOverlay } from "./components/settings/SettingsGuideOverlay";
 import { API_KEY_STORE_KEYS } from "./components/settings/ApiKeysSettings";
 import {
   DEFAULT_HOLD_HOTKEY,
@@ -29,7 +38,11 @@ import {
   DEFAULT_TOGGLE_HOTKEY,
 } from "./lib/hotkeyDefaults";
 import { applyAccentColor } from "./lib/accentColor";
-import { useSettings } from "./lib/queries";
+import {
+  useSetSettingsGuideState,
+  useSettings,
+  useSettingsGuideState,
+} from "./lib/queries";
 import { type HotkeyConfig, tauriAPI } from "./lib/tauri";
 import "./styles.css";
 
@@ -376,6 +389,238 @@ function SettingsView() {
   );
 }
 
+function SettingsViewWithGuideLauncher({
+  onRunSetupGuide,
+}: {
+  onRunSetupGuide: () => void;
+}) {
+  const { data: settings } = useSettings();
+  const profiles = settings?.rewrite_program_prompt_profiles ?? [];
+  const [editingProfileId, setEditingProfileId] = useState<string>("default");
+  const [programsModalOpen, setProgramsModalOpen] = useState(false);
+  const [autoCreateProfileOnOpen, setAutoCreateProfileOnOpen] = useState(false);
+
+  const { data: hasAnyApiKey } = useQuery({
+    queryKey: ["hasAnyApiKey"],
+    queryFn: async () => {
+      try {
+        const results = await Promise.all(
+          API_KEY_STORE_KEYS.map((key) => tauriAPI.hasApiKey(key))
+        );
+        return results.some(Boolean);
+      } catch {
+        // If we can't determine key status, don't block users by forcing the API Keys tab.
+        return true;
+      }
+    },
+  });
+
+  const [activeSettingsTab, setActiveSettingsTab] = useState<string>("ai");
+  const [hasUserSelectedTab, setHasUserSelectedTab] = useState(false);
+
+  useEffect(() => {
+    if (hasUserSelectedTab) return;
+    if (hasAnyApiKey === undefined) return;
+    setActiveSettingsTab(hasAnyApiKey ? "ai" : "api-keys");
+  }, [hasAnyApiKey, hasUserSelectedTab]);
+
+  useEffect(() => {
+    // Consume the one-shot flag as soon as the modal is opened.
+    if (programsModalOpen && autoCreateProfileOnOpen) {
+      setAutoCreateProfileOnOpen(false);
+    }
+  }, [programsModalOpen, autoCreateProfileOnOpen]);
+
+  useEffect(() => {
+    if (editingProfileId === "default") return;
+    if (!profiles.some((p) => p.id === editingProfileId)) {
+      setEditingProfileId("default");
+    }
+  }, [editingProfileId, profiles]);
+
+  const editingOptions = [
+    { value: "default", label: "Default" },
+    ...profiles.map((p) => ({
+      value: p.id,
+      label: p.name.trim() ? p.name.trim() : p.id,
+    })),
+  ];
+
+  return (
+    <div className="main-content">
+      <header
+        className="animate-in"
+        style={{
+          marginBottom: 20,
+          display: "flex",
+          alignItems: "flex-end",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <Title order={1} mb={4}>
+            Settings
+          </Title>
+          <Text c="dimmed" size="sm">
+            Configure your preferences
+          </Text>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Tooltip label="Run setup guide" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="orange"
+                size="sm"
+                aria-label="Run setup guide"
+                onClick={onRunSetupGuide}
+              >
+                <CircleHelp size={14} />
+              </ActionIcon>
+            </Tooltip>
+
+            <Tooltip label="New profile" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="orange"
+                size="sm"
+                aria-label="New profile"
+                onClick={() => {
+                  setAutoCreateProfileOnOpen(true);
+                  setProgramsModalOpen(true);
+                }}
+              >
+                <Plus size={14} />
+              </ActionIcon>
+            </Tooltip>
+
+            <Select
+              data={editingOptions}
+              value={editingProfileId}
+              onChange={(v) => setEditingProfileId(v ?? "default")}
+              withCheckIcon={false}
+              size="xs"
+              styles={{
+                input: {
+                  backgroundColor: "transparent",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: 6,
+                  color: "var(--text-primary)",
+                  minWidth: 140,
+                  paddingLeft: 8,
+                  paddingRight: 4,
+                },
+                dropdown: {
+                  backgroundColor: "var(--bg-elevated)",
+                  borderColor: "var(--border-default)",
+                },
+              }}
+            />
+
+            <Tooltip
+              label={
+                editingProfileId === "default"
+                  ? "Select a none-default profile to configure programs"
+                  : "Profile config"
+              }
+              withArrow
+            >
+              <ActionIcon
+                variant="subtle"
+                color="orange"
+                size="sm"
+                aria-label="Profile config"
+                onClick={() => setProgramsModalOpen(true)}
+                disabled={editingProfileId === "default"}
+              >
+                <Cog size={14} />
+              </ActionIcon>
+            </Tooltip>
+          </div>
+        </div>
+      </header>
+
+      <ProfileConfigModal
+        opened={programsModalOpen}
+        onClose={() => {
+          setProgramsModalOpen(false);
+          setAutoCreateProfileOnOpen(false);
+        }}
+        editingProfileId={editingProfileId}
+        onEditingProfileChange={setEditingProfileId}
+        autoCreateProfile={autoCreateProfileOnOpen}
+      />
+
+      <Tabs
+        value={activeSettingsTab}
+        onChange={(value) => {
+          if (!value) return;
+          setHasUserSelectedTab(true);
+          setActiveSettingsTab(value);
+        }}
+        classNames={{ root: "settings-tabs" }}
+        keepMounted={false}
+      >
+        <Tabs.List>
+          <Tabs.Tab value="ai">AI</Tabs.Tab>
+          <Tabs.Tab value="ui">UI</Tabs.Tab>
+          <Tabs.Tab value="audio">Audio</Tabs.Tab>
+          <Tabs.Tab value="hotkeys">Hotkeys</Tabs.Tab>
+          <Tabs.Tab value="api-keys">API Keys</Tabs.Tab>
+        </Tabs.List>
+
+        <Tabs.Panel value="ai" pt="md">
+          <div className="settings-card">
+            <PromptSettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="ui" pt="md">
+          <div className="settings-card">
+            <UiSettings
+              editingProfileId={editingProfileId}
+              onRunSetupGuide={onRunSetupGuide}
+            />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="audio" pt="md">
+          <div className="settings-card">
+            <AudioSettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="hotkeys" pt="md">
+          <div className="settings-card">
+            <HotkeySettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="api-keys" pt="md">
+          <div className="settings-card">
+            <ApiKeysSettings editingProfileId={editingProfileId} />
+          </div>
+        </Tabs.Panel>
+      </Tabs>
+    </div>
+  );
+}
+
 function AccentColorSync() {
   const { data: settings } = useSettings();
 
@@ -388,13 +633,35 @@ function AccentColorSync() {
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>("home");
+  const [settingsGuideOpen, setSettingsGuideOpen] = useState(false);
+  const didAutoOpenGuideRef = useRef(false);
+  const { data: guideState } = useSettingsGuideState();
+  const setGuideState = useSetSettingsGuideState();
+  const { data: settings } = useSettings();
+
+  useEffect(() => {
+    if (didAutoOpenGuideRef.current) return;
+    if (!guideState) return;
+
+    if (guideState === "pending") {
+      didAutoOpenGuideRef.current = true;
+      setActiveView("settings");
+      setSettingsGuideOpen(true);
+    }
+  }, [guideState]);
 
   const renderView = () => {
     switch (activeView) {
       case "home":
         return <HomeView />;
       case "settings":
-        return <SettingsView />;
+        return (
+          <SettingsViewWithGuideLauncher
+            onRunSetupGuide={() => {
+              setSettingsGuideOpen(true);
+            }}
+          />
+        );
       case "logs":
         return (
           <div className="main-content">
@@ -409,8 +676,32 @@ export default function App() {
   return (
     <div className="app-layout">
       <AccentColorSync />
-      <Sidebar activeView={activeView} onViewChange={setActiveView} />
+      <Sidebar
+        activeView={activeView}
+        onViewChange={(view) => {
+          setActiveView(view);
+          if (view === "settings" && guideState === "pending") {
+            setSettingsGuideOpen(true);
+          }
+        }}
+      />
       {renderView()}
+
+      <SettingsGuideOverlay
+        opened={settingsGuideOpen}
+        holdHotkey={settings?.hold_hotkey ?? null}
+        onSkip={() => {
+          setSettingsGuideOpen(false);
+          setGuideState.mutate("skipped");
+        }}
+        onFinished={() => {
+          setSettingsGuideOpen(false);
+          setGuideState.mutate("completed");
+        }}
+        onGoHome={() => {
+          setActiveView("home");
+        }}
+      />
     </div>
   );
 }

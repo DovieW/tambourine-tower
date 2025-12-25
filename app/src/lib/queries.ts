@@ -8,6 +8,7 @@ import {
   llmAPI,
   logsAPI,
   recordingsAPI,
+  type SettingsGuideState,
   type AudioCue,
   type OutputMode,
   type PlayingAudioHandling,
@@ -59,6 +60,25 @@ export function useSettings() {
     queryKey: ["settings"],
     queryFn: () => tauriAPI.getSettings(),
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+export function useSettingsGuideState() {
+  return useQuery({
+    queryKey: ["settingsGuideState"],
+    queryFn: () => tauriAPI.getSettingsGuideState(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+export function useSetSettingsGuideState() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (state: SettingsGuideState) =>
+      tauriAPI.setSettingsGuideState(state),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settingsGuideState"] });
+    },
   });
 }
 

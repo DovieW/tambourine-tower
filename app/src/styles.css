@@ -838,3 +838,209 @@ a:focus-visible {
 	animation-delay: 0.2s;
 	opacity: 0;
 }
+
+/* =======================================================================
+	Settings first-run guide
+   ======================================================================= */
+
+.tang-guide-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 9999;
+	background: #000;
+	color: var(--text-primary);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+}
+
+.tang-guide-fade-in {
+	opacity: 1;
+	transform: translateY(0);
+	pointer-events: auto;
+	transition:
+		opacity 280ms ease,
+		transform 280ms ease;
+}
+
+.tang-guide-fade-in-slow {
+	transition:
+		opacity 650ms ease,
+		transform 650ms ease;
+}
+
+.tang-guide-welcome-logo:not(.tang-guide-fade-in),
+.tang-guide-welcome-text:not(.tang-guide-fade-in),
+.tang-guide-continue:not(.tang-guide-fade-in),
+.tang-guide-finish:not(.tang-guide-fade-in),
+.tang-guide-content:not(.tang-guide-fade-in),
+.tang-guide-skip:not(.tang-guide-fade-in),
+.tang-guide-back:not(.tang-guide-fade-in) {
+	opacity: 0;
+	transform: translateY(-10px);
+	pointer-events: none;
+}
+
+.tang-guide-welcome {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.tang-guide-welcome-center {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	max-width: 720px;
+}
+
+.tang-guide-welcome-logo {
+	color: var(--accent-primary);
+}
+
+.tang-guide-welcome--fade-out {
+	opacity: 0;
+	transition: opacity 450ms ease;
+}
+
+.tang-guide-continue {
+	position: fixed;
+	right: 22px;
+	bottom: 18px;
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: rgba(var(--accent-rgb) / 0.82);
+	font-size: 16px;
+	padding: 10px 12px;
+	cursor: pointer;
+	letter-spacing: 0.02em;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	transition:
+		color 160ms ease,
+		transform 160ms ease,
+		opacity 160ms ease;
+}
+
+.tang-guide-continue:hover {
+	color: rgba(var(--accent-rgb) / 0.98);
+	transform: translateY(-1px);
+}
+
+.tang-guide-finish {
+	position: fixed;
+	right: 22px;
+	bottom: 18px;
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: rgba(var(--accent-rgb) / 0.82);
+	font-size: 16px;
+	padding: 10px 12px;
+	cursor: pointer;
+	letter-spacing: 0.02em;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	transition:
+		color 160ms ease,
+		transform 160ms ease,
+		opacity 160ms ease;
+}
+
+.tang-guide-finish:hover {
+	color: rgba(var(--accent-rgb) / 0.98);
+	transform: translateY(-1px);
+}
+
+
+.tang-guide-content {
+	width: min(820px, 100%);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	gap: 18px;
+}
+
+.tang-guide-step {
+	width: min(820px, 100%);
+	min-height: 240px;
+}
+
+.tang-guide-skip {
+	position: fixed;
+	right: 22px;
+	bottom: 18px;
+	background: transparent;
+	border: none;
+	color: rgba(var(--accent-rgb) / 0.82);
+	font-size: 16px;
+	padding: 10px 12px;
+	cursor: pointer;
+	letter-spacing: 0.02em;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.tang-guide-back {
+	position: fixed;
+	left: 22px;
+	bottom: 18px;
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: rgba(var(--accent-rgb) / 0.82);
+	font-size: 16px;
+	padding: 10px 12px;
+	cursor: pointer;
+	letter-spacing: 0.02em;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	transition:
+		color 160ms ease,
+		transform 160ms ease,
+		opacity 160ms ease;
+}
+
+.tang-guide-back:hover {
+	color: rgba(var(--accent-rgb) / 0.98);
+	transform: translateY(-1px);
+}
+
+.tang-guide-skip:hover {
+	color: rgba(var(--accent-rgb) / 0.98);
+}
+
+.tang-guide-skip:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
+
+.tang-guide-copy-box {
+	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 12px;
+	padding: 12px;
+}
+
+.tang-guide-hold-button {
+	user-select: none;
+}
+
+.tang-guide-kbd-combo {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+}

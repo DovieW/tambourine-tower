@@ -110,6 +110,8 @@ export type OutputMode = "paste" | "paste_and_clipboard" | "clipboard";
 
 export type TranscriptionRetentionUnit = "days" | "hours";
 
+export type SettingsGuideState = "pending" | "skipped" | "completed";
+
 function normalizeOutputMode(value: unknown): OutputMode {
   if (
     value === "paste" ||
@@ -277,6 +279,15 @@ export const defaultPasteLastHotkey: HotkeyConfig = {
 // ============================================================================
 
 let storeInstance: Store | null = null;
+
+const SETTINGS_GUIDE_STATE_KEY = "settings_guide_state";
+
+function normalizeSettingsGuideState(value: unknown): SettingsGuideState {
+  if (value === "pending" || value === "skipped" || value === "completed") {
+    return value;
+  }
+  return "pending";
+}
 
 async function getStore(): Promise<Store> {
   if (!storeInstance) {
@@ -593,7 +604,7 @@ export const tauriAPI = {
       ),
 
       // Time retention: new (unit+value), with legacy fallback to transcription_retention_days.
-      ...await(async () => {
+      ...(await (async () => {
         const rawUnit = await store.get("transcription_retention_unit");
         const rawValue = await store.get("transcription_retention_value");
 
@@ -615,7 +626,7 @@ export const tauriAPI = {
           transcription_retention_unit: unit,
           transcription_retention_value: value,
         };
-      })(),
+      })()),
       transcription_retention_delete_recordings:
         normalizeTranscriptionRetentionDeleteRecordings(
           await store.get("transcription_retention_delete_recordings")
@@ -909,6 +920,25 @@ export const tauriAPI = {
     const store = await getStore();
     await store.delete(storeKey);
     await store.save();
+  },
+
+  // Onboarding / guide state
+  async getSettingsGuideState(): Promise<SettingsGuideState> {
+    const store = await getStore();
+    const raw = await store.get(SETTINGS_GUIDE_STATE_KEY);
+    return normalizeSettingsGuideState(raw);
+  },
+
+  async setSettingsGuideState(state: SettingsGuideState): Promise<void> {
+    const store = await getStore();
+    await store.set(
+      SETTINGS_GUIDE_STATE_KEY,
+      normalizeSettingsGuideState(state)
+    );
+    await store.save();
+
+    // Notify other windows that persisted state changed.
+    await emit("settings-changed", { [SETTINGS_GUIDE_STATE_KEY]: state });
   },
 
   async resetHotkeysToDefaults(): Promise<void> {

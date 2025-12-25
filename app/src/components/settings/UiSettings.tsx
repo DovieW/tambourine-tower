@@ -114,8 +114,10 @@ function getProfileValue<T>(
 
 export function UiSettings({
   editingProfileId,
+  onRunSetupGuide,
 }: {
   editingProfileId?: string;
+  onRunSetupGuide?: () => void;
 }) {
   const { data: settings, isLoading } = useSettings();
   const { data: isAudioMuteSupported } = useIsAudioMuteSupported();
@@ -376,6 +378,34 @@ export function UiSettings({
           </Button>
         </Group>
       </Modal>
+
+      {onRunSetupGuide && (
+        <div className="settings-row">
+          <div>
+            <p className="settings-label">Setup guide</p>
+            <p className="settings-description">
+              Re-run the first-time walkthrough
+            </p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Tooltip
+              label={GLOBAL_ONLY_TOOLTIP}
+              disabled={!isProfileScope}
+              withArrow
+            >
+              <span>
+                <Button
+                  variant="default"
+                  disabled={isProfileScope}
+                  onClick={onRunSetupGuide}
+                >
+                  Run setup guide
+                </Button>
+              </span>
+            </Tooltip>
+          </div>
+        </div>
+      )}
 
       <div className="settings-row">
         <div>
