@@ -4,18 +4,28 @@
 
 - Home has a compact single-row floating recorder with icon-only Record, Pause/Resume,
   Stop & transcribe, Cancel, and elapsed captured time. Its options popover holds
-  Computer audio and recovery actions. Tooltips explain icons; errors open that popover
-  without expanding the bar; saved recordings highlight the options button.
+  a remembered Dictation/Meeting selector. Meeting options include a separate model
+  picker and Computer audio. Record has an accessible label but no tooltip. Detailed
+  errors and saved recordings open a separate dialog; the popover has no scrollbar.
 - Home recordings save transcripts to History, never type or paste into another
   application. That output mode belongs to the Rust session and also applies
   when F3 stops a Home recording. Ordinary F3 dictation is unchanged.
 - Pausing keeps capture devices open but excludes paused samples. The elapsed
   counter measures retained audio, not wall-clock time. Ordinary F3 sessions do
   not offer meeting pause controls.
-- Stop transcribes the saved recording, assembles one transcript, and applies
-  current rewrite settings once, producing one successful History/playback entry.
-  Nothing is transcribed while Home capture is running. Speaker diarization and
-  live captions are not implemented.
+- Stop assembles one transcript and one successful History/playback entry. Dictation
+  applies optional rewriting once; Meeting bypasses rewriting, routing, clipboard
+  context and automatic OCR regardless of profile/preset settings. Nothing is
+  transcribed while Home capture is running. There are no live captions.
+- Recording preferences use the non-secret `recording_preferences` settings key.
+  The mode, explicit meeting provider/model, and managed/BYOK route are snapshotted in an owner-only
+  `.options.json` file before capture and copied alongside the complete saved WAV.
+  Recovery and reruns use this snapshot, not the current popup selection. Missing
+  legacy metadata means Dictation; unreadable metadata fails closed. Length never
+  determines recording mode.
+- Meeting's model picker lists enabled managed models and configured user-key/local
+  options separately. Its route does not depend on or change Dictation's route.
+  An unavailable managed choice fails with audio retained, never silently uses a key.
 - Final audio is normalized to mono 16 kHz. After Stop, uploads contain at most
   ten minutes (~19.2 MB), below the managed gateway's 25 MB request limit. Cuts
   prefer a quiet boundary in the last ten seconds; sample ranges have no gaps or
@@ -67,10 +77,10 @@ Transcribe action.
   recovery. Recovery files are not automatically purged on an age timer.
 - Home lists interrupted recordings. Transcribe resumes completed upload results
   from owner-only `.transcripts` checkpoints in the recovery directory. They
-  contain sensitive transcript text, are not encrypted by Kolboo, and are synced
+  contain sensitive transcript text and optional speaker segments, are not encrypted by Kolboo, and are synced
   after each successful upload. A partial trailing checkpoint line is ignored.
   Cache keys bind the complete audio checksum, sample range, provider/model,
-  language, and transcription prompt. Changing these starts fresh uploads.
+  language, transcription prompt, and Meeting's managed/BYOK choice. Changing these starts fresh uploads.
   A successful History row prevents resubmission after a crash before cleanup.
   Cancellation, provider errors, and history persistence errors retain the source.
 - A crash after a provider finishes but before its checkpoint is synced can repeat
@@ -79,12 +89,64 @@ Transcribe action.
   persistent partial-text cache. Failed original recovery remains resumable.
 - Legacy section progress is ignored when preparing a full final transcription;
   existing section History rows are preserved, not silently deleted.
-- Successful completion removes the raw journal, partial transcripts, and any legacy cursor. Discard
+- Successful completion removes the raw journal, mode metadata, partial transcripts, and any legacy cursor. Discard
   removes the selected journal. Delete all recordings includes recovery journals and rejects
   deletion while capture/transcription is active. Completed recording WAVs use the
   existing recording store and its controls.
 - Recovery is exclusive with new recording and other retry commands. The
   recovery cancellation token also covers final audio preparation.
+
+## Meeting speaker labels
+
+`gpt-4o-transcribe-diarize` uses the existing OpenAI BYOK adapter, or the existing
+managed Edge path when authorized and enabled in the Edge catalog. No provider key
+is provisioned by this feature and no model/default is automatically enabled.
+Requests use `response_format=diarized_json` and `chunking_strategy=auto`, with no
+prompt, timestamp-granularity or known-speaker-reference fields.
+
+Each upload's text and speaker segments are checkpointed. The displayed document
+contains simple speaker-labelled paragraphs and part boundaries. Speaker A in
+different parts does **not** assert the same identity. Original STT text and segment
+metadata remain separate from manual corrections; edited text is never falsely
+realigned to timestamps. There is no speaker management or synchronized highlighting.
+
+## History reader, playback, and corrections
+
+- List queries return a bounded 320-character preview plus lightweight metadata;
+  expanding one card loads its complete document on demand. Explicit Copy loads
+  complete corrected text, never the preview. Existing filters/pagination remain.
+- Cards expand rather than copy. Inline transcripts scroll after 300 px. Every card
+  offers Open full view: title, fixed player, literal search with previous/next
+  matches, Copy and explicit Edit mode, above one scrolling reading surface.
+- One HTML media element belongs to the History view. It pauses on collapse,
+  modal close, switching entries and navigation, preserves session positions, and
+  never autoplays on expansion. Controls include waveform seeking, keyboard seek,
+  ±10 seconds, elapsed/total time and speed.
+- Rust streams PCM to generate at most 4096 min/max waveform pairs, caches them
+  beside the WAV and validates the source fingerprint. WaveSurfer renders these
+  precomputed peaks; the webview does not decode the complete meeting to draw it.
+  Tauri asset playback permits individual canonical files within RecordingStore,
+  supports range requests, and grants no recursive directory access. The old
+  whole-file base64 fallback and playback timeout are removed.
+- Corrections are stored in `history-edits/<hashed-entry-id>.json`, owned by
+  HistoryStorage. Original History output remains unchanged. Writes are serialized,
+  use synced private temporary files and same-directory replacement, and reject
+  stale revisions. Saves debounce at 600 ms with a five-second maximum while typing.
+  Closing flushes pending edits; failed saves leave the draft available for copying,
+  retry or explicit conflict resolution. Unsaved drafts survive view navigation in
+  memory, not a process crash. No transcript is put in browser local storage.
+- Restore original restores text without resetting the revision; reruns create
+  separate entries referencing the same recording. Search, previews, Copy, analysis
+  and existing exports use corrected text. Retention/deletion remove correction
+  sidecars and original metadata with their entry; audio deletion removes waveform
+  caches and recording options. Delete-transcripts also clears speaker metadata
+  and persists a revision barrier: delayed autosaves and stale correction sidecars
+  cannot restore cleared text after a restart.
+
+Focused tests use synthetic audio, mocked provider HTTP and a local DOM environment.
+Visual acceptance should use user screenshots of a collapsed card, expanded card,
+full reader and recorder popover. Production enablement, paid provider smoke tests
+and release publication are separate rollout actions, not part of this change.
 
 ## Entitlement status correction
 
@@ -94,6 +156,16 @@ an explicitly Expired entitlement is not revived by cached timestamps. Community
 operation remains available without managed access.
 
 ## Validation and remaining acceptance
+
+The History/recording-mode redesign passes the desktop's full Rust test command
+(829 passed, 12 ignored), frontend tests (664 passed, 57 skipped), typechecking,
+lint, formatting, Knip, renderer production build and the local-Whisper compile
+check. API Edge's full suite passes (153 tests), including mocked enabled/disabled
+diarization routes. No real credentials or paid API calls are needed by these tests.
+Native playback, visual acceptance, and physical recording of this redesign still
+require an app restart and manual checks. No release or deployment was performed.
+
+### Earlier recorder baseline checks (before the History redesign)
 
 Deterministic tests cover session output ownership, pause state, recovery job
 exclusivity/cancellation, journal data beyond the memory ring, explicit discard,

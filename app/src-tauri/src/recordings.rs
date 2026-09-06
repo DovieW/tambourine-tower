@@ -1,10 +1,14 @@
 use schemars::JsonSchema;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use crate::app_paths::ensure_dir;
 use crate::fs::{Fs, RealFs};
+
+pub mod options;
+mod waveform;
+pub use waveform::RecordingWaveform;
 
 #[derive(Debug, Clone, Copy, serde::Serialize, JsonSchema)]
 pub struct RecordingsStats {
@@ -22,6 +26,7 @@ pub struct RecordingStore {
     // This is best-effort; correctness still relies on the filesystem.
     known_existing: RwLock<std::collections::HashSet<String>>,
     fs: Arc<dyn Fs>,
+    media_write: Mutex<()>,
 }
 
 impl RecordingStore {
@@ -36,6 +41,7 @@ impl RecordingStore {
             dir,
             known_existing: RwLock::new(std::collections::HashSet::new()),
             fs,
+            media_write: Mutex::new(()),
         }
     }
 
@@ -50,6 +56,14 @@ impl RecordingStore {
 
     fn path_for_id(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{}.wav", id))
+    }
+
+    fn sidecar_owner(path: &Path) -> Option<&str> {
+        let name = path.file_name()?.to_str()?;
+        let id = name
+            .strip_suffix(".options.json")
+            .or_else(|| name.strip_suffix(".waveform.json"))?;
+        Self::is_safe_request_id(id).then_some(id)
     }
 
     /// Returns the absolute WAV path for a given request id if it exists on disk.
@@ -113,6 +127,10 @@ impl RecordingStore {
     }
 
     pub fn save_wav(&self, id: &str, wav_bytes: &[u8]) -> Result<(), String> {
+        let _guard = self
+            .media_write
+            .lock()
+            .map_err(|_| "Recording store unavailable")?;
         if id.trim().is_empty() {
             return Err("Cannot save recording: empty id".to_string());
         }
@@ -130,8 +148,9 @@ impl RecordingStore {
                 .map_err(|e| format!("Failed to create recordings dir: {}", e))?;
         }
 
+        self.remove_waveform(id)?;
         self.fs
-            .write(&path, wav_bytes)
+            .write_private(&path, wav_bytes)
             .map_err(|e| format!("Failed to write recording {}: {}", path.display(), e))?;
 
         if let Ok(mut known) = self.known_existing.write() {
@@ -142,6 +161,9 @@ impl RecordingStore {
     }
 
     pub fn load_wav(&self, id: &str) -> Result<Vec<u8>, String> {
+        if !Self::is_safe_request_id(id) {
+            return Err("Invalid request id".into());
+        }
         let path = self.path_for_id(id);
         self.fs
             .read(&path)
@@ -152,12 +174,23 @@ impl RecordingStore {
     ///
     /// Returns `true` if a file was deleted.
     pub fn delete_wav_if_exists(&self, id: &str) -> Result<bool, String> {
+        let _guard = self
+            .media_write
+            .lock()
+            .map_err(|_| "Recording store unavailable")?;
         if !Self::is_safe_request_id(id) {
             return Err("Invalid request id".to_string());
         }
 
+        self.remove_waveform(id)?;
         let path = self.path_for_id(id);
+        let options = self.dir.join(format!("{id}.options.json"));
         if !self.fs.exists(&path) {
+            if self.fs.exists(&options) {
+                self.fs
+                    .remove_file(&options)
+                    .map_err(|_| "Could not remove recording metadata")?;
+            }
             // Keep existence cache best-effort in sync.
             if let Ok(mut known) = self.known_existing.write() {
                 known.remove(id);
@@ -168,6 +201,12 @@ impl RecordingStore {
         self.fs
             .remove_file(&path)
             .map_err(|e| format!("Failed to delete recording {}: {}", path.display(), e))?;
+        // Preserve mode ownership if deleting the audio failed.
+        if self.fs.exists(&options) {
+            self.fs
+                .remove_file(&options)
+                .map_err(|_| "Could not remove recording metadata")?;
+        }
 
         if let Ok(mut known) = self.known_existing.write() {
             known.remove(id);
@@ -179,7 +218,7 @@ impl RecordingStore {
     /// Returns basic stats about saved recordings.
     ///
     /// - `count`: number of `.wav` files in the recordings directory
-    /// - `bytes`: total size (in bytes) of those `.wav` files
+    /// - `bytes`: total size of WAVs and owned recording metadata/waveforms
     ///
     /// Best-effort: skips files it can't stat.
     pub fn stats(&self) -> Result<RecordingsStats, String> {
@@ -200,6 +239,11 @@ impl RecordingStore {
                 Err(_) => continue,
             };
             if !meta.is_file() {
+                continue;
+            }
+
+            if Self::sidecar_owner(&path).is_some() {
+                bytes = bytes.saturating_add(meta.len());
                 continue;
             }
 
@@ -272,7 +316,11 @@ impl RecordingStore {
         let mut deleted = 0usize;
         for (path, _) in files.into_iter().take(delete_count) {
             // Best-effort delete.
-            if self.fs.remove_file(&path).is_ok() {
+            if path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|id| self.delete_wav_if_exists(id).unwrap_or(false))
+            {
                 deleted += 1;
 
                 // Keep existence cache best-effort in sync.
@@ -319,8 +367,30 @@ impl RecordingStore {
                 continue;
             }
 
-            if self.fs.remove_file(&path).is_ok() {
-                deleted = deleted.saturating_add(1);
+            if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
+                if self.delete_wav_if_exists(id)? {
+                    deleted = deleted.saturating_add(1);
+                }
+            }
+        }
+
+        // Clean leftovers from an interrupted delete; never remove metadata for
+        // surviving audio or files not owned by RecordingStore.
+        let _guard = self
+            .media_write
+            .lock()
+            .map_err(|_| "Recording store unavailable")?;
+        for path in self
+            .fs
+            .read_dir(&self.dir)
+            .map_err(|_| "Could not inspect recordings")?
+        {
+            if let Some(id) = Self::sidecar_owner(&path) {
+                if !self.fs.exists(&self.path_for_id(id)) {
+                    self.fs
+                        .remove_file(&path)
+                        .map_err(|_| "Could not remove recording metadata")?;
+                }
             }
         }
 
@@ -335,5 +405,40 @@ impl RecordingStore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn directory(&self) -> &Path {
         &self.dir
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use options::{RecordingMode, RecordingPreferences};
+
+    #[test]
+    fn failed_audio_deletion_preserves_mode_and_bulk_cleanup_is_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecordingStore::new(temp.path().to_owned());
+        let options = RecordingPreferences {
+            mode: RecordingMode::Meeting,
+            meeting_model: None,
+        };
+        store.save_options("blocked", &options).unwrap();
+        // A directory at the exact file path deterministically makes remove_file
+        // fail on all platforms, without changing permissions or using sleeps.
+        std::fs::create_dir(store.path_for_id("blocked")).unwrap();
+        assert!(store.delete_wav_if_exists("blocked").is_err());
+        assert_eq!(
+            store.options("blocked").unwrap().mode,
+            RecordingMode::Meeting
+        );
+        store.save_options("orphan", &options).unwrap();
+        store.save_wav("audio", b"test audio").unwrap();
+        store.save_options("audio", &options).unwrap();
+        let unrelated = store.dir.join("notes.txt");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        assert_eq!(store.delete_all_wavs().unwrap(), 1);
+        assert!(!store.dir.join("audio.options.json").exists());
+        assert!(!store.dir.join("orphan.options.json").exists());
+        assert!(store.dir.join("blocked.options.json").exists());
+        assert!(unrelated.exists());
     }
 }

@@ -658,7 +658,7 @@ describe("settings contract: Rust defaults vs TS getSettings", () => {
 			(k) => !(k in schemaProps),
 		);
 
-		const entryProps = schema.definitions?.HistoryEntry?.properties ?? {};
+		const entryProps = schema.definitions?.HistorySummary?.properties ?? {};
 		const missingEntryKeys = Object.keys(sampleEntry).filter(
 			(k) => !(k in entryProps),
 		);

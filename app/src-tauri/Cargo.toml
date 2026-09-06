@@ -44,6 +44,7 @@ tauri = { version = "~2.11.5", default-features = false, features = [
     "macos-private-api",
     "image-png",
     "devtools",
+    "protocol-asset",
 ] }
 tauri-utils = "~2.9.3"
 tauri-plugin-opener = "2.5.4"
@@ -177,6 +178,7 @@ gtk = "0.18.2"
 keyring = { version = "3", features = ["linux-native"] }
 
 [dev-dependencies]
+tempfile = "3"
 wiremock = "0.6.5"
 
 # Compile dependencies with optimizations even in dev/test builds.

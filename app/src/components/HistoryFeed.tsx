@@ -38,6 +38,7 @@ import { HistoryDeleteDialogs } from "./history/HistoryDeleteDialogs";
 import { HistoryFeedFilterToolbar } from "./history/HistoryFeedFilterToolbar";
 import { HistoryFeedList } from "./history/HistoryFeedList";
 import { HistoryFeedPagination } from "./history/HistoryFeedPagination";
+import { prunePendingHistoryDocuments } from "./history/HistoryReader";
 
 export function HistoryFeed({
 	onJumpToLog,
@@ -48,6 +49,7 @@ export function HistoryFeed({
 	const recordingsStats = useRecordingsStats();
 
 	const invalidateHistoryQueries = () => {
+		void prunePendingHistoryDocuments();
 		queryClient.invalidateQueries({ queryKey: ["history"] });
 		queryClient.invalidateQueries({ queryKey: ["historyAll"] });
 		queryClient.invalidateQueries({ queryKey: ["historyPage"] });
@@ -72,6 +74,7 @@ export function HistoryFeed({
 			return deletedRecordings;
 		},
 		onSuccess: (deletedRecordings) => {
+			void prunePendingHistoryDocuments();
 			queryClient.invalidateQueries({ queryKey: ["history"] });
 			queryClient.invalidateQueries({ queryKey: ["historyAll"] });
 			queryClient.invalidateQueries({ queryKey: ["historyPage"] });
@@ -242,6 +245,8 @@ export function HistoryFeed({
 
 		const setup = async () => {
 			unlisten = await tauriAPI.onHistoryChanged(() => {
+				void prunePendingHistoryDocuments();
+				queryClient.invalidateQueries({ queryKey: ["historyDetail"] });
 				queryClient.invalidateQueries({ queryKey: ["history"] });
 				queryClient.invalidateQueries({ queryKey: ["historyAll"] });
 				queryClient.invalidateQueries({ queryKey: ["historyPage"] });
@@ -703,11 +708,7 @@ export function HistoryFeed({
 				isRetryPending={retryMutation.isPending}
 				retryPendingEntryId={retryPendingEntryId}
 				recordingExistsById={historyOrchestration.recordingExistsById}
-				isRecordingPlaying={(recordingId) => player.isPlaying(recordingId)}
-				isRecordingLoading={(recordingId) => player.isLoading(recordingId)}
-				onToggleRecording={(recordingId) => {
-					void player.toggle(recordingId);
-				}}
+				player={player}
 				requestLogIds={requestLogIds}
 				onJumpToLog={onJumpToLog}
 				onDeleteEntry={handleDelete}

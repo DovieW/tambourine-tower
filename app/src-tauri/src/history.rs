@@ -5,11 +5,14 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::app_paths::ensure_dir;
 use crate::fs::{Fs, RealFs};
+
+mod edits;
+pub use edits::{HistoryDetail, HistoryEdit, HistoryEditInput};
 
 /// Hard safety cap to prevent unbounded growth of `history.json`.
 ///
@@ -83,6 +86,40 @@ pub struct HistoryEntry {
     /// When `None`, no recording is known/available for this entry.
     #[serde(default)]
     pub recording_request_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
+    /// Optional original recording metadata, never realigned to manual edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_mode: Option<crate::recordings::options::RecordingMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speaker_segments: Vec<crate::stt::SpeakerSegment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_stt_text: Option<String>,
+}
+
+/// List contract: text is a bounded preview, never the full document. Original
+/// STT and speaker metadata are intentionally only available through detail.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySummary {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub text: String,
+    pub status: HistoryStatus,
+    pub error_message: Option<String>,
+    pub title: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub recording_mode: Option<crate::recordings::options::RecordingMode>,
+    pub recording_request_id: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub preset_id: Option<String>,
+    pub preset_name: Option<String>,
+    pub stt_provider: Option<String>,
+    pub stt_model: Option<String>,
+    pub llm_provider: Option<String>,
+    pub llm_model: Option<String>,
 }
 
 /// Metadata about which models were used for a transcription request.
@@ -159,6 +196,11 @@ impl HistoryEntry {
             llm_provider: None,
             llm_model: None,
             recording_request_id: None,
+            title: None,
+            duration_seconds: None,
+            recording_mode: None,
+            speaker_segments: Vec::new(),
+            original_stt_text: None,
         }
     }
 
@@ -178,14 +220,22 @@ impl HistoryEntry {
             llm_provider: model_info.llm_provider,
             llm_model: model_info.llm_model,
             recording_request_id: None,
+            title: None,
+            duration_seconds: None,
+            recording_mode: None,
+            speaker_segments: Vec::new(),
+            original_stt_text: None,
         }
     }
 }
 
 /// Storage for dictation history entries
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct HistoryData {
     entries: Vec<HistoryEntry>,
+    /// Privacy clears invalidate every outstanding editor without retaining text.
+    #[serde(default)]
+    edit_revision_floor: u64,
 }
 
 /// Manages loading and saving of dictation history
@@ -193,6 +243,8 @@ pub struct HistoryStorage {
     data: RwLock<HistoryData>,
     file_path: PathBuf,
     fs: Arc<dyn Fs>,
+    mutation: Mutex<()>,
+    edits: RwLock<edits::EditStore>,
 }
 
 impl HistoryStorage {
@@ -217,6 +269,11 @@ impl HistoryStorage {
         }
 
         // Load existing history or recover safely.
+        let backup = file_path.with_extension("json.bak");
+        if !fs.exists(&file_path) && fs.exists(&backup) {
+            // Compatibility with snapshots interrupted during the old two-rename replacement.
+            let _ = fs.rename(&backup, &file_path);
+        }
         let data = match Self::load_from_file(fs.as_ref(), &file_path) {
             Ok(data) => data,
             Err(LoadHistoryError::NotFound) => HistoryData::default(),
@@ -239,10 +296,18 @@ impl HistoryStorage {
             }
         };
 
+        let edits = edits::EditStore::load(
+            fs.as_ref(),
+            &file_path,
+            &data.entries,
+            data.edit_revision_floor,
+        );
         Self {
             data: RwLock::new(data),
             file_path,
             fs,
+            mutation: Mutex::new(()),
+            edits: RwLock::new(edits),
         }
     }
 
@@ -311,20 +376,24 @@ impl HistoryStorage {
             .map_err(|e| format!("Failed to serialize history: {}", e))?;
 
         self.atomic_write_history_json(content.as_bytes())?;
+        self.cleanup_edits(&data.entries)?;
 
         Ok(())
     }
 
     fn atomic_write_history_json(&self, bytes: &[u8]) -> Result<(), String> {
-        let Some(parent) = self.file_path.parent() else {
+        self.atomic_write_json(&self.file_path, bytes)
+    }
+
+    fn atomic_write_json(&self, file_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+        let Some(parent) = file_path.parent() else {
             return Err("Failed to write history file: missing parent directory".to_string());
         };
         self.fs
             .create_dir_all(parent)
             .map_err(|e| format!("Failed to create history dir {}: {}", parent.display(), e))?;
 
-        let file_name = self
-            .file_path
+        let file_name = file_path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("history.json");
@@ -333,7 +402,8 @@ impl HistoryStorage {
         let bak_path = parent.join(format!("{}.bak", file_name));
 
         // Write new content to a temp file first.
-        self.fs.write(&tmp_path, bytes).map_err(|e| {
+        self.fs.write_private(&tmp_path, bytes).map_err(|e| {
+            let _ = self.fs.remove_file(&tmp_path);
             format!(
                 "Failed to write temp history file {}: {}",
                 tmp_path.display(),
@@ -341,41 +411,20 @@ impl HistoryStorage {
             )
         })?;
 
-        // Move current history file out of the way so we can atomically-ish replace.
-        if self.fs.exists(&self.file_path) {
-            // Best-effort: clear old backup.
-            if self.fs.exists(&bak_path) {
-                let _ = self.fs.remove_file(&bak_path);
-            }
-
-            // Prefer rename to a backup (keeps old content recoverable).
-            if let Err(e) = self.fs.rename(&self.file_path, &bak_path) {
-                log::warn!(
-                    "HistoryStorage: failed to move old history file to backup {}: {} (will attempt remove)",
-                    bak_path.display(),
-                    e
-                );
-                self.fs.remove_file(&self.file_path).map_err(|e| {
-                    let _ = self.fs.remove_file(&tmp_path);
-                    format!(
-                        "Failed to replace history file {} (could not remove old file): {}",
-                        self.file_path.display(),
-                        e
-                    )
-                })?;
-            }
+        // Remove legacy backups before committing, so cleanup failure cannot
+        // report a failed save after the new revision has already been written.
+        if self.fs.exists(&bak_path) && self.fs.remove_file(&bak_path).is_err() {
+            let _ = self.fs.remove_file(&tmp_path);
+            return Err("Could not remove previous document snapshot".into());
         }
 
-        // Now move the temp file into place.
-        if let Err(e) = self.fs.rename(&tmp_path, &self.file_path) {
-            // Best-effort restore: move backup back if it exists and target is missing.
-            if self.fs.exists(&bak_path) && !self.fs.exists(&self.file_path) {
-                let _ = self.fs.rename(&bak_path, &self.file_path);
-            }
+        // Same-directory rename replaces a file on all supported platforms.
+        // Never unlink the original first: it remains intact on rename failure.
+        if let Err(e) = self.fs.rename(&tmp_path, file_path) {
             let _ = self.fs.remove_file(&tmp_path);
             return Err(format!(
                 "Failed to replace history file {}: {}",
-                self.file_path.display(),
+                file_path.display(),
                 e
             ));
         }
@@ -389,6 +438,7 @@ impl HistoryStorage {
         text: String,
         max_entries: Option<usize>,
     ) -> Result<HistoryEntry, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let entry = HistoryEntry::new(text);
         {
             let mut data = self
@@ -418,6 +468,7 @@ impl HistoryStorage {
         model_info: RequestModelInfo,
         max_entries: Option<usize>,
     ) -> Result<HistoryEntry, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let entry = HistoryEntry::new_request_in_progress(request_id, model_info);
         {
             let mut data = self
@@ -447,6 +498,7 @@ impl HistoryStorage {
 
     /// Truncate history to at most `max_entries` entries.
     pub fn trim_to(&self, max_entries: usize) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let max = max_entries.max(1);
         {
             let mut data = self
@@ -464,6 +516,7 @@ impl HistoryStorage {
     ///
     /// Returns the list of removed entry IDs (useful for cleaning up recordings).
     pub fn prune_older_than(&self, cutoff: DateTime<Utc>) -> Result<Vec<String>, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let mut removed: Vec<String> = Vec::new();
         let changed = {
             let mut data = self
@@ -501,6 +554,7 @@ impl HistoryStorage {
         &self,
         error_message: String,
     ) -> Result<usize, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let mut updated = 0usize;
 
         {
@@ -527,6 +581,15 @@ impl HistoryStorage {
 
     /// Mark an existing request entry as successful and set the final text.
     pub fn complete_request_success(&self, request_id: &str, text: String) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
+        let previous = self
+            .data
+            .read()
+            .map_err(|_| "History unavailable")?
+            .entries
+            .iter()
+            .find(|e| e.id == request_id)
+            .cloned();
         {
             let mut data = self
                 .data
@@ -553,7 +616,20 @@ impl HistoryStorage {
                 }
             }
         }
-        self.save()
+        if let Err(error) = self.save() {
+            // Recovery checks Success before removing its journal. A failed
+            // durable save must never leave a false successful row in memory.
+            let mut data = self.data.write().map_err(|_| "History unavailable")?;
+            if let Some(previous) = previous {
+                if let Some(entry) = data.entries.iter_mut().find(|e| e.id == request_id) {
+                    *entry = previous;
+                }
+            } else {
+                data.entries.retain(|e| e.id != request_id);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Mark an existing request entry as failed with an error message.
@@ -562,6 +638,7 @@ impl HistoryStorage {
         request_id: &str,
         error_message: String,
     ) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -637,12 +714,16 @@ impl HistoryStorage {
             .read()
             .map_err(|e| format!("Failed to read history: {}", e))?;
 
-        let entries = match limit {
+        let entries: Vec<HistoryEntry> = match limit {
             Some(n) => data.entries.iter().take(n).cloned().collect(),
             None => data.entries.clone(),
         };
 
-        Ok(entries)
+        let edits = self.edits.read().map_err(|_| "History edits unavailable")?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| edits.apply(entry))
+            .collect())
     }
 
     /// Get a single history entry by request id.
@@ -652,7 +733,13 @@ impl HistoryStorage {
             .read()
             .map_err(|e| format!("Failed to read history: {}", e))?;
 
-        Ok(data.entries.iter().find(|e| e.id == request_id).cloned())
+        let edits = self.edits.read().map_err(|_| "History edits unavailable")?;
+        Ok(data
+            .entries
+            .iter()
+            .find(|e| e.id == request_id)
+            .cloned()
+            .map(|e| edits.apply(e)))
     }
 
     /// Update the stored profile metadata for an existing history entry.
@@ -665,6 +752,7 @@ impl HistoryStorage {
         profile_id: Option<String>,
         profile_name: Option<String>,
     ) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -690,6 +778,7 @@ impl HistoryStorage {
         preset_id: Option<String>,
         preset_name: Option<String>,
     ) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -711,6 +800,7 @@ impl HistoryStorage {
         request_id: &str,
         recording_request_id: Option<String>,
     ) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -736,6 +826,7 @@ impl HistoryStorage {
         llm_provider: Option<String>,
         llm_model: Option<String>,
     ) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -762,6 +853,7 @@ impl HistoryStorage {
             .map_err(|e| format!("Failed to read history: {}", e))?;
 
         let entries = &data.entries;
+        let edits = self.edits.read().map_err(|_| "History edits unavailable")?;
         let total_all = entries.len();
 
         // Defaults match the current UI behavior.
@@ -816,7 +908,7 @@ impl HistoryStorage {
         let matches_filters = |entry: &HistoryEntry| -> bool {
             // 1) Text search
             if !filter_text.is_empty() {
-                let text = entry.text.to_lowercase();
+                let text = edits.text(entry).to_lowercase();
                 let status = match entry.status {
                     HistoryStatus::InProgress => "in_progress",
                     HistoryStatus::Success => "success",
@@ -826,7 +918,12 @@ impl HistoryStorage {
 
                 let matches = text.contains(&filter_text)
                     || status.contains(&filter_text)
-                    || err.contains(&filter_text);
+                    || err.contains(&filter_text)
+                    || edits
+                        .title(entry)
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&filter_text);
                 if !matches {
                     return false;
                 }
@@ -840,7 +937,7 @@ impl HistoryStorage {
             // 3) Show Empty transcript
             if !show_empty_transcript
                 && entry.status == HistoryStatus::Success
-                && entry.text.trim().is_empty()
+                && edits.text(entry).trim().is_empty()
             {
                 return false;
             }
@@ -898,10 +995,37 @@ impl HistoryStorage {
         let start = (page - 1) * page_size;
         let end = (start + page_size).min(total_filtered);
 
-        let items: Vec<HistoryEntry> = if start >= total_filtered {
+        let items: Vec<HistorySummary> = if start >= total_filtered {
             Vec::new()
         } else {
-            filtered[start..end].iter().map(|e| (*e).clone()).collect()
+            filtered[start..end]
+                .iter()
+                .map(|e| {
+                    // Only a bounded preview crosses IPC. Details are loaded on demand.
+                    HistorySummary {
+                        id: e.id.clone(),
+                        timestamp: e.timestamp,
+                        status: e.status,
+                        text: edits.text(e).chars().take(320).collect(),
+                        title: edits.title(e).map(str::to_owned),
+                        error_message: e
+                            .error_message
+                            .as_ref()
+                            .map(|s| s.chars().take(320).collect()),
+                        duration_seconds: e.duration_seconds,
+                        recording_mode: e.recording_mode,
+                        recording_request_id: e.recording_request_id.clone(),
+                        profile_id: e.profile_id.clone(),
+                        profile_name: e.profile_name.clone(),
+                        preset_id: e.preset_id.clone(),
+                        preset_name: e.preset_name.clone(),
+                        stt_provider: e.stt_provider.clone(),
+                        stt_model: e.stt_model.clone(),
+                        llm_provider: e.llm_provider.clone(),
+                        llm_model: e.llm_model.clone(),
+                    }
+                })
+                .collect()
         };
 
         Ok(HistoryPageResult {
@@ -930,10 +1054,12 @@ impl HistoryStorage {
             .metadata(&self.file_path)
             .map(|m| m.len())
             .unwrap_or(0)
+            .saturating_add(self.edits_size_bytes())
     }
 
     /// Delete an entry by ID
     pub fn delete(&self, id: &str) -> Result<bool, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let deleted = {
             let mut data = self
                 .data
@@ -956,6 +1082,7 @@ impl HistoryStorage {
     ///
     /// Returns the number of entries removed.
     pub fn delete_many(&self, ids: &HashSet<String>) -> Result<usize, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         if ids.is_empty() {
             return Ok(0);
         }
@@ -985,6 +1112,7 @@ impl HistoryStorage {
         &self,
         recording_request_id: &str,
     ) -> Result<usize, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         let mut updated = 0usize;
 
         {
@@ -1015,31 +1143,52 @@ impl HistoryStorage {
     ///
     /// Returns the number of entries whose `text` was changed.
     pub fn clear_all_transcript_text_keep_recordings(&self) -> Result<usize, String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
+        let mut data = self.data.write().map_err(|_| "History unavailable")?;
+        let mut edits = self
+            .edits
+            .write()
+            .map_err(|_| "History edits unavailable")?;
+        let mut cleared = data.clone();
+        cleared.edit_revision_floor = edits
+            .max_revision()
+            .max(data.edit_revision_floor)
+            .checked_add(1)
+            .filter(|n| *n <= 9_007_199_254_740_991)
+            .ok_or("Document revision limit reached")?;
         let mut updated = 0usize;
-
-        {
-            let mut data = self
-                .data
-                .write()
-                .map_err(|e| format!("Failed to write history: {}", e))?;
-
-            for entry in data.entries.iter_mut() {
-                if !entry.text.is_empty() {
-                    entry.text.clear();
-                    updated += 1;
-                }
+        for entry in cleared.entries.iter_mut() {
+            if !entry.text.is_empty()
+                || entry.title.is_some()
+                || !entry.speaker_segments.is_empty()
+                || entry.original_stt_text.is_some()
+                || edits.has_correction(&entry.id)
+            {
+                updated += 1;
+            }
+            entry.title = None;
+            entry.speaker_segments.clear();
+            entry.original_stt_text = None;
+            if !entry.text.is_empty() {
+                entry.text.clear();
             }
         }
-
-        if updated > 0 {
-            self.save()?;
-        }
-
+        // Commit the empty originals and revision barrier first. After a crash,
+        // old sidecars cannot make deleted text reappear; delayed saves conflict.
+        let bytes =
+            serde_json::to_vec_pretty(&cleared).map_err(|_| "Could not prepare History clear")?;
+        self.atomic_write_history_json(&bytes)?;
+        *data = cleared;
+        *edits = edits::EditStore::default();
+        drop(edits);
+        drop(data);
+        self.cleanup_edits(&[])?;
         Ok(updated)
     }
 
     /// Clear all history
     pub fn clear(&self) -> Result<(), String> {
+        let _mutation = self.mutation.lock().map_err(|_| "History unavailable")?;
         {
             let mut data = self
                 .data
@@ -1089,7 +1238,7 @@ pub struct HistoryPageQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPageResult {
-    pub items: Vec<HistoryEntry>,
+    pub items: Vec<HistorySummary>,
     pub total_all: usize,
     pub total_filtered: usize,
     pub page: usize,

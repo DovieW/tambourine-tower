@@ -11,6 +11,8 @@ import type {
 	HistoryDeleteMode,
 	HistoryDeleteOptions,
 	HistoryDeleteResult,
+	HistoryDetail,
+	HistoryEditInput,
 	HistoryPageQuery,
 	HistoryPageResult,
 	IterateRewritePromptResponse,
@@ -24,7 +26,9 @@ import type {
 	ModelPricing,
 	OpenWindowInfo,
 	ProviderCostTotal,
+	RecordingPreferences,
 	RecordingsStats,
+	RecordingWaveform,
 	RequestLog,
 	SttModelPricing,
 	SystemProxyInfo,
@@ -67,6 +71,63 @@ function readSchema(schemaFile: string): JsonSchema {
 }
 
 describe.skipIf(!hasSchemas())("schema contract: command responses", () => {
+	it("keeps reader, revisioned edits, waveform and recording preferences aligned", () => {
+		const detail: HistoryDetail = {
+			entry: {
+				id: "meeting",
+				timestamp: "2026-01-01T00:00:00Z",
+				text: "Speaker A: Hello",
+				status: "success",
+				speaker_segments: [
+					{
+						speaker: "A",
+						text: "Hello",
+						start_seconds: 0,
+						end_seconds: 2,
+						part: 1,
+					},
+				],
+			},
+			original_text: "Speaker A: Hello",
+			revision: 1,
+			edited: false,
+			edit_error: null,
+		};
+		const edit: HistoryEditInput = {
+			id: "meeting",
+			expected_revision: 1,
+			title: "Notes",
+			text: "Correction",
+		};
+		const preferences: RecordingPreferences = {
+			mode: "meeting",
+			meeting_model: { provider: "openai", model: "gpt-4o-transcribe-diarize" },
+		};
+		const waveform: RecordingWaveform = {
+			duration_seconds: 14400,
+			peaks: [-1, 1],
+		};
+		for (const [file, sample] of [
+			["history-detail.schema.json", detail],
+			["history-edit-input.schema.json", edit],
+			["recording-preferences.schema.json", preferences],
+			["recording-waveform.schema.json", waveform],
+		] as const) {
+			expect(
+				Object.keys(sample).filter(
+					(key) => !(key in (readSchema(file).properties ?? {})),
+				),
+				file,
+			).toEqual([]);
+		}
+		const speaker = readSchema("history-detail.schema.json").definitions
+			?.SpeakerSegment;
+		expect(
+			Object.keys(detail.entry.speaker_segments?.[0] ?? {}).filter(
+				(key) => !(key in (speaker?.properties ?? {})),
+			),
+		).toEqual([]);
+	});
 	it("keeps RequestLog shape aligned with backend JSON schema", () => {
 		const sampleLog: RequestLog = {
 			id: "log-1",
@@ -180,6 +241,9 @@ describe.skipIf(!hasSchemas())("schema contract: command responses", () => {
 			llm_provider: null,
 			llm_model: null,
 			recording_request_id: null,
+			title: "Test meeting",
+			duration_seconds: 3600,
+			recording_mode: "meeting",
 		};
 
 		const sampleResult: HistoryPageResult = {
@@ -198,7 +262,9 @@ describe.skipIf(!hasSchemas())("schema contract: command responses", () => {
 			(k) => !(k in schemaProps),
 		);
 
-		const entryProps = schema.definitions?.HistoryEntry?.properties ?? {};
+		const entryProps = schema.definitions?.HistorySummary?.properties ?? {};
+		expect(entryProps).not.toHaveProperty("speaker_segments");
+		expect(entryProps).not.toHaveProperty("original_stt_text");
 		const missingEntryKeys = Object.keys(sampleEntry).filter(
 			(k) => !(k in entryProps),
 		);

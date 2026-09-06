@@ -109,6 +109,34 @@ pub async fn get_history_page(
     history.query_page(params).map_err(CommandError::from)
 }
 
+#[tauri::command]
+pub async fn get_history_detail(
+    id: String,
+    history: State<'_, HistoryStorage>,
+) -> CommandResult<Option<crate::history::HistoryDetail>> {
+    history.detail(&id).map_err(history_error)
+}
+
+#[tauri::command]
+pub async fn save_history_edit(
+    app: AppHandle,
+    input: crate::history::HistoryEditInput,
+) -> CommandResult<crate::history::HistoryEdit> {
+    // Large corrections and fsync must not occupy the async command executor.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        app.state::<HistoryStorage>().save_edit(input)
+    })
+    .await
+    .map_err(|_| history_error("Could not finish saving this correction"))?;
+    result.map_err(|message| {
+        if message.starts_with("HISTORY_EDIT_CONFLICT") {
+            history_error(message).with_code("HISTORY_EDIT_CONFLICT")
+        } else {
+            history_error(message)
+        }
+    })
+}
+
 /// Delete a history entry by ID
 #[tauri::command]
 pub async fn delete_history_entry(

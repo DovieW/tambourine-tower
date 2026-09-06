@@ -66,7 +66,10 @@ mod utils;
 
 enum SavedAudioMode<'a> {
     Dictation,
-    Meeting(Option<&'a std::path::Path>),
+    Journal(
+        Option<&'a std::path::Path>,
+        &'a crate::recordings::options::RecordingPreferences,
+    ),
 }
 
 use config::canonicalize_stt_provider_id;
@@ -1544,6 +1547,7 @@ impl SharedPipeline {
                 recording::QuietAudioGateResult::NoSpeechDetected => {
                     inner.reset_to_idle();
                     return Ok(TranscriptionResult {
+                        speaker_segments: Vec::new(),
                         stt_text: String::new(),
                         final_text: String::new(),
                         stt_duration_ms: 0,
@@ -1560,6 +1564,7 @@ impl SharedPipeline {
                 recording::QuietAudioGateResult::Quiet => {
                     inner.reset_to_idle();
                     return Ok(TranscriptionResult {
+                        speaker_segments: Vec::new(),
                         stt_text: String::new(),
                         final_text: String::new(),
                         stt_duration_ms: 0,
@@ -1958,25 +1963,35 @@ impl SharedPipeline {
         .await
     }
 
-    pub async fn transcribe_meeting_wav(
+    pub async fn transcribe_journal_wav(
         &self,
         wav: Vec<u8>,
         profile: Option<&str>,
         checkpoint: Option<&std::path::Path>,
+        options: &crate::recordings::options::RecordingPreferences,
     ) -> Result<TranscriptionResult, PipelineError> {
         if !self.is_recovering() {
             return Err(PipelineError::Config(
                 "Meeting recovery ownership is required".into(),
             ));
         }
+        let selection = if options.mode == crate::recordings::options::RecordingMode::Meeting {
+            Some(options.meeting_model.as_ref().ok_or_else(|| {
+                PipelineError::Config(
+                    "Select a meeting transcription model in Recording options".into(),
+                )
+            })?)
+        } else {
+            None
+        };
         self.transcribe_saved_audio(
             wav,
             profile,
+            selection.map(|s| s.provider.as_str()),
+            selection.map(|s| s.model.as_str()),
             None,
             None,
-            None,
-            None,
-            SavedAudioMode::Meeting(checkpoint),
+            SavedAudioMode::Journal(checkpoint, options),
         )
         .await
     }
@@ -1992,7 +2007,15 @@ impl SharedPipeline {
         forced_llm_model: Option<&str>,
         mode: SavedAudioMode<'_>,
     ) -> Result<TranscriptionResult, PipelineError> {
-        let is_meeting = matches!(mode, SavedAudioMode::Meeting(_));
+        let is_journal = matches!(mode, SavedAudioMode::Journal(..));
+        let is_meeting = matches!(
+            mode,
+            SavedAudioMode::Journal(_, options) if options.mode == crate::recordings::options::RecordingMode::Meeting
+        );
+        let meeting_selection = match mode {
+            SavedAudioMode::Journal(_, options) if is_meeting => options.meeting_model.as_ref(),
+            _ => None,
+        };
         // Phase 1: Resolve providers/config under lock.
         let (
             stt_provider,
@@ -2026,12 +2049,12 @@ impl SharedPipeline {
             }
 
             // Avoid a permanent full-meeting debug copy.
-            if !is_meeting {
+            if !is_journal {
                 inner.last_wav_bytes = Some(wav_bytes.clone());
             }
 
             // Check size limit
-            let max_bytes = if is_meeting {
+            let max_bytes = if is_journal {
                 meeting_transcription::MAX_MEETING_WAV_BYTES
             } else {
                 inner.config.max_recording_bytes
@@ -2047,7 +2070,7 @@ impl SharedPipeline {
             );
 
             // Ensure we have a cancellation token for this attempt.
-            let cancel_token = if is_meeting {
+            let cancel_token = if is_journal {
                 inner.recovery_job.clone().ok_or_else(|| {
                     PipelineError::Config("Meeting recovery ownership is required".into())
                 })?
@@ -2090,15 +2113,46 @@ impl SharedPipeline {
                 });
             }
             // Resolve effective STT settings (profile overrides -> global defaults, with safe fallback)
+            if let Some(selection) = meeting_selection {
+                if selection.use_managed
+                    && !(inner.config.managed_inference_enabled
+                        && managed_gateway_ready(&inner.config)
+                        && stt_provider_resolver::managed_stt_model_supported(
+                            &selection.provider,
+                            Some(&selection.model),
+                        ))
+                {
+                    let message = "Managed meeting transcription is unavailable. Your recording is preserved.";
+                    inner.set_error(message);
+                    return Err(PipelineError::Config(message.into()));
+                }
+            }
+            // Provider creation and its cache key both see the meeting's route.
+            // Restore Dictation's preference before releasing this mutex, even
+            // on resolution failure; the created provider owns its own transport.
+            let dictation_managed_preference = inner.config.managed_stt_preferred;
+            if let Some(selection) = meeting_selection {
+                inner.config.managed_stt_preferred = selection.use_managed;
+            }
             let resolved_stt = stt_provider_resolver::resolve_stt_provider_for_transcription(
                 &mut inner,
                 SttProviderResolutionRequest {
-                    active_profile: active_profile.as_ref(),
-                    active_preset: active_preset.as_ref(),
+                    active_profile: if is_meeting {
+                        None
+                    } else {
+                        active_profile.as_ref()
+                    },
+                    active_preset: if is_meeting {
+                        None
+                    } else {
+                        active_preset.as_ref()
+                    },
                     forced_provider: forced_stt_provider,
                     forced_model: forced_stt_model,
                 },
-            )?;
+            );
+            inner.config.managed_stt_preferred = dictation_managed_preference;
+            let resolved_stt = resolved_stt?;
 
             let retry_config = inner.config.retry_config.clone();
 
@@ -2119,7 +2173,9 @@ impl SharedPipeline {
             )
         };
 
-        self.start_ocr_task_if_auto(&ocr_config, ocr_modes.should_auto_start(false));
+        if !is_meeting {
+            self.start_ocr_task_if_auto(&ocr_config, ocr_modes.should_auto_start(false));
+        }
 
         log::info!(
             "Pipeline: Starting retry transcription ({} bytes, timeout {:?})",
@@ -2128,13 +2184,13 @@ impl SharedPipeline {
         );
 
         // Phase 2: STT transcription
-        let result = if let SavedAudioMode::Meeting(checkpoint) = mode {
+        let result = if let SavedAudioMode::Journal(checkpoint, _) = mode {
             let settings_key = {
                 let inner = self
                     .inner
                     .lock()
                     .map_err(|e| PipelineError::Lock(e.to_string()))?;
-                format!(
+                let key = format!(
                     "{:?}",
                     (
                         &stt_provider_id,
@@ -2142,7 +2198,12 @@ impl SharedPipeline {
                         &stt_language,
                         &inner.config.stt_transcription_prompt
                     )
-                )
+                );
+                if let Some(selection) = meeting_selection {
+                    format!("{key}:managed={}", selection.use_managed)
+                } else {
+                    key
+                }
             };
             let result = meeting_transcription::transcribe(
                 &wav_bytes,
@@ -2199,8 +2260,35 @@ impl SharedPipeline {
             )
             .await?
         };
+        let speaker_segments = result.segments;
         let (stt_text, stt_duration_ms, stt_retry) =
             (result.text, result.duration_ms, Some(result.retry));
+
+        // Meeting is a separate product mode, not an inherited rewrite toggle.
+        // Bypass routing, OCR, clipboard context, and every rewrite override.
+        if is_meeting {
+            if cancel_token.is_cancelled() {
+                self.finish_failed_stt_attempt(&PipelineError::Cancelled)?;
+                return Err(PipelineError::Cancelled);
+            }
+            let final_text = crate::stt::speaker_document(&stt_text, &speaker_segments);
+            self.inner
+                .lock()
+                .map_err(|e| PipelineError::Lock(e.to_string()))?
+                .reset_to_idle();
+            return Ok(TranscriptionResult {
+                speaker_segments,
+                stt_text,
+                final_text,
+                stt_duration_ms,
+                stt_retry,
+                llm_duration_ms: None,
+                llm_provider_used: None,
+                llm_model_used: None,
+                llm_outcome: LlmOutcome::NotAttempted(LlmNotAttemptedReason::MeetingMode),
+                live_output_completed: false,
+            });
+        }
 
         // Phase 3-4: Routing and LLM rewrite via transcription_flow module
         let (proxy_settings, llm_api_keys, request_log_store, llm_enabled_global, llm_config) = {
@@ -2274,7 +2362,7 @@ impl SharedPipeline {
         )
         .await;
 
-        if is_meeting && cancel_token.is_cancelled() {
+        if is_journal && cancel_token.is_cancelled() {
             self.finish_failed_stt_attempt(&PipelineError::Cancelled)?;
             return Err(PipelineError::Cancelled);
         }

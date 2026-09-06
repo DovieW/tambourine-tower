@@ -850,14 +850,103 @@ async fn meeting_transcription_bypasses_only_dictation_size_limit_and_requires_o
         Err(PipelineError::RecordingTooLarge(..))
     ));
     assert!(p
-        .transcribe_meeting_wav(wav.clone(), None, None)
+        .transcribe_journal_wav(wav.clone(), None, None, &Default::default())
         .await
         .is_err());
     p.begin_recovery().unwrap();
-    let result = p.transcribe_meeting_wav(wav, None, None).await.unwrap();
+    let result = p
+        .transcribe_journal_wav(wav, None, None, &Default::default())
+        .await
+        .unwrap();
     assert_eq!(result.stt_text, "one final transcript");
     assert_eq!(result.final_text, "one final transcript");
     assert_eq!(p.state(), PipelineState::Idle);
+    assert!(p.is_recovering());
+    p.end_recovery();
+}
+
+#[tokio::test]
+async fn meeting_managed_choice_never_falls_back_to_a_user_key_when_access_is_unavailable() {
+    use crate::recordings::options::{MeetingModel, RecordingMode, RecordingPreferences};
+    let mut config = test_config_for_transcription();
+    config.managed_stt_preferred = false;
+    let p = SharedPipeline::new_for_tests(config, Box::new(FakeAudioCapture::new()));
+    // A direct provider is ready in the cache. Choosing Managed may not use it.
+    p.inject_stt_provider_for_tests(
+        "openai",
+        Some("gpt-4o-transcribe-diarize"),
+        None,
+        Arc::new(MockSttProvider::new("Must not use a different route")),
+    );
+    let mut audio = crate::audio_capture::AudioBuffer::new(16000, 1, 1.0);
+    audio.append(&vec![0.25; 16000]);
+    let options = RecordingPreferences {
+        mode: RecordingMode::Meeting,
+        meeting_model: Some(MeetingModel {
+            provider: "openai".into(),
+            model: "gpt-4o-transcribe-diarize".into(),
+            use_managed: true,
+        }),
+    };
+    p.begin_recovery().unwrap();
+    let error = p
+        .transcribe_journal_wav(audio.to_wav_bytes().unwrap(), None, None, &options)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Managed meeting transcription is unavailable"));
+    assert!(!p.config().managed_stt_preferred);
+    assert!(p.is_recovering());
+    p.end_recovery();
+}
+
+#[tokio::test]
+async fn meeting_mode_never_rewrites_even_when_dictation_rewriting_is_enabled() {
+    use crate::recordings::options::{MeetingModel, RecordingMode, RecordingPreferences};
+    let mut config = test_config_for_transcription();
+    config.llm_config = mock_llm_config(true, Vec::new());
+    insert_mock_llm_api_key(&mut config);
+    let p = SharedPipeline::new_for_tests(config, Box::new(FakeAudioCapture::new()));
+    p.inject_stt_provider_for_tests(
+        MOCK_PROVIDER,
+        Some("meeting-model"),
+        None,
+        Arc::new(MockSttProvider::new("Unchanged meeting")),
+    );
+    p.inject_llm_provider_for_tests(
+        MOCK_PROVIDER,
+        None,
+        Arc::new(MockLlmProvider::new("Must not run")),
+    );
+    let mut audio = crate::audio_capture::AudioBuffer::new(16000, 1, 1.0);
+    audio.append(&vec![0.25; 16000]);
+    let options = RecordingPreferences {
+        mode: RecordingMode::Meeting,
+        meeting_model: Some(MeetingModel {
+            provider: MOCK_PROVIDER.into(),
+            model: "meeting-model".into(),
+            use_managed: false,
+        }),
+    };
+    p.inner.lock().unwrap().config.managed_stt_preferred = true;
+    p.begin_recovery().unwrap();
+    let result = p
+        .transcribe_journal_wav(audio.to_wav_bytes().unwrap(), None, None, &options)
+        .await
+        .unwrap();
+    assert_eq!(result.final_text, "Unchanged meeting");
+    assert!(
+        p.config().managed_stt_preferred,
+        "Meeting must not change Dictation's route"
+    );
+    assert!(!result.llm_attempted());
+    assert_eq!(
+        result.llm_outcome,
+        crate::pipeline::LlmOutcome::NotAttempted(
+            crate::pipeline::LlmNotAttemptedReason::MeetingMode
+        )
+    );
     assert!(p.is_recovering());
     p.end_recovery();
 }

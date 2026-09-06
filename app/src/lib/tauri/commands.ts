@@ -273,6 +273,13 @@ export const tauriAPI = {
 		return invoke("get_history_page", { params });
 	},
 
+	getHistoryDetail: (id: string) =>
+		invoke<import("./types").HistoryDetail | null>("get_history_detail", {
+			id,
+		}),
+	saveHistoryEdit: (input: import("./types").HistoryEditInput) =>
+		invoke<import("./types").HistoryEdit>("save_history_edit", { input }),
+
 	async deleteHistoryEntry(id: string): Promise<boolean> {
 		return invoke("delete_history_entry", { id });
 	},
@@ -645,6 +652,10 @@ export const ocrAPI = {
 };
 
 export const recordingControlsAPI = {
+	getPreferences: () =>
+		invoke<import("./types").RecordingPreferences>("recording_get_preferences"),
+	setPreferences: (preferences: import("./types").RecordingPreferences) =>
+		invoke<void>("recording_set_preferences", { preferences }),
 	getSeconds: () => invoke<number>("pipeline_get_recording_seconds"),
 	canPause: () => invoke<boolean>("pipeline_can_pause_recording"),
 	computerAudioAvailable: () =>
@@ -782,11 +793,13 @@ export const recordingsAPI = {
 		return path ? convertFileSrc(path) : null;
 	},
 
-	// Returns base64 WAV bytes, or null if no recording exists.
-	getRecordingWavBase64: (params: { requestId: string }) =>
-		invoke<string | null>("recording_get_wav_base64", {
-			requestId: params.requestId,
-		}),
+	getRecordingWaveform: (params: { requestId: string }) =>
+		invoke<import("./types").RecordingWaveform | null>(
+			"recording_get_waveform",
+			{
+				requestId: params.requestId,
+			},
+		),
 
 	// Open recordings directory in file explorer.
 	openRecordingsFolder: () => invoke<void>("recordings_open_folder"),

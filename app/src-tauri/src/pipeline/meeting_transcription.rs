@@ -20,6 +20,8 @@ struct CompletedUpload {
     key: String,
     text: String,
     duration_ms: u64,
+    #[serde(default)]
+    segments: Vec<crate::stt::SpeakerSegment>,
 }
 
 fn storage_error(_: impl std::fmt::Display) -> PipelineError {
@@ -101,11 +103,13 @@ where
     }
     let source_key = Sha256::digest(wav);
     let mut output = SttResult {
+        segments: Vec::new(),
         text: String::new(),
         duration_ms: 0,
         retry: Default::default(),
     };
     let mut start = 0;
+    let mut part = 1;
     while start < reader.duration() {
         if cancel.is_cancelled() {
             return Err(PipelineError::Cancelled);
@@ -138,7 +142,7 @@ where
         let end = start + samples.len() as u32;
         let key = format!(
             "{:x}",
-            Sha256::digest(format!("{source_key:x}:{settings_key}:{start}:{end}"))
+            Sha256::digest(format!("v1:{source_key:x}:{settings_key}:{start}:{end}"))
         );
         let entry = if let Some(entry) = completed.remove(&key) {
             entry
@@ -155,6 +159,7 @@ where
             output.retry.total_delay_ms += result.retry.total_delay_ms;
             output.retry.last_error = result.retry.last_error;
             let entry = CompletedUpload {
+                segments: result.segments,
                 key,
                 text: result.text,
                 duration_ms: result.duration_ms,
@@ -179,6 +184,15 @@ where
             output.text.push_str(entry.text.trim());
         }
         output.duration_ms += entry.duration_ms;
+        output
+            .segments
+            .extend(entry.segments.into_iter().map(|mut segment| {
+                segment.part = part;
+                segment.start_seconds += start as f64 / 16000.0;
+                segment.end_seconds += start as f64 / 16000.0;
+                segment
+            }));
+        part += 1;
         start = end;
         reader.seek(start).map_err(storage_error)?;
     }
@@ -216,6 +230,7 @@ mod tests {
     }
     fn result(text: &str) -> SttResult {
         SttResult {
+            segments: Vec::new(),
             text: text.into(),
             duration_ms: 1,
             retry: Default::default(),
@@ -226,6 +241,43 @@ mod tests {
             "kolboo-meeting-{}.transcripts",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[tokio::test]
+    async fn diarized_meeting_checkpoints_preserve_request_local_speakers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("checkpoint");
+        let wav = audio(32000);
+        let token = CancellationToken::new();
+        let original = transcribe_blocks(&wav, Some(&path), "diarize", &token, 16000, |_| async {
+            let mut result = result("Hello");
+            result.segments.push(crate::stt::SpeakerSegment {
+                speaker: "A".into(),
+                text: "Hello".into(),
+                start_seconds: 0.0,
+                end_seconds: 0.5,
+                part: 1,
+            });
+            Ok(result)
+        })
+        .await
+        .unwrap();
+        let resumed = transcribe_blocks(&wav, Some(&path), "diarize", &token, 16000, |_| async {
+            panic!("completed uploads must not repeat")
+        })
+        .await
+        .unwrap();
+        assert_eq!(resumed.segments.len(), 2);
+        assert_eq!(resumed.segments[0].part, 1);
+        assert_eq!(resumed.segments[1].part, 2);
+        assert_eq!(resumed.segments[1].start_seconds, 1.0);
+        assert_eq!(
+            serde_json::to_value(&original.segments).unwrap(),
+            serde_json::to_value(&resumed.segments).unwrap()
+        );
+        let document = crate::stt::speaker_document(&resumed.text, &resumed.segments);
+        assert!(document.contains("Part 2"));
+        assert_eq!(document.matches("Speaker A").count(), 2);
     }
 
     #[tokio::test]

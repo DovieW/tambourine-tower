@@ -13,6 +13,7 @@
 //! - WebSocket: https://platform.openai.com/docs/guides/realtime-websocket
 //! - Client events: https://platform.openai.com/docs/api-reference/realtime-client-events
 
+mod diarization;
 mod realtime;
 
 use super::http;
@@ -207,6 +208,11 @@ impl OpenAiSttProvider {
         prompt: Option<&str>,
     ) -> Result<String, SttError> {
         let endpoint = self.transcriptions_url();
+        if self.model == "gpt-4o-transcribe-diarize" {
+            return diarization::transcribe(self, audio)
+                .await
+                .map(|result| result.text);
+        }
         let clamped_prompt = self.clamp_prompt_for_model(prompt);
         let language = self.default_language.as_deref();
         openai_compat::transcribe_wav_multipart_openai_compat(
@@ -411,6 +417,20 @@ impl OpenAiSttProvider {
 
 #[async_trait]
 impl SttProvider for OpenAiSttProvider {
+    async fn transcribe_detailed(
+        &self,
+        audio: &[u8],
+        format: &AudioFormat,
+    ) -> Result<super::SttTranscript, SttError> {
+        if self.model == "gpt-4o-transcribe-diarize" {
+            diarization::transcribe(self, audio).await
+        } else {
+            Ok(super::SttTranscript {
+                text: self.transcribe(audio, format).await?,
+                segments: Vec::new(),
+            })
+        }
+    }
     async fn transcribe(&self, audio: &[u8], _format: &AudioFormat) -> Result<String, SttError> {
         if self.supports_realtime_streaming() {
             return Err(SttError::Config(format!(

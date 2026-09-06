@@ -56,17 +56,85 @@ pub(super) fn resolve_stt_provider_for_transcription(
         request.forced_model,
     );
 
-    let mut provider_id_used = resolve_stt_provider_for_runtime(
-        &inner.config,
-        &effective.provider_id,
-        effective.model.as_deref(),
-    );
+    let mut provider_id_used = if request.forced_provider.is_some() {
+        effective.provider_id.clone()
+    } else {
+        resolve_stt_provider_for_runtime(
+            &inner.config,
+            &effective.provider_id,
+            effective.model.as_deref(),
+        )
+    };
     let mut model_used = model_for_log(inner, provider_id_used.as_str(), effective.model.clone());
     let mut language_used = effective.language.clone();
 
     log_stt_provider_selection(inner, provider_id_used.as_str(), model_used.clone());
 
-    let provider = match get_or_create_stt_provider(
+    // A meeting's explicitly selected local model must not follow later changes
+    // to the dictation model. Use the existing model directory, never a UI path.
+    #[cfg(feature = "local-whisper")]
+    if request.forced_provider.is_some()
+        && provider_id_used == local_provider::LOCAL_WHISPER_PROVIDER_ID
+    {
+        let normalize = |value: &str| {
+            value
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let selected = crate::stt::WhisperModel::all()
+            .into_iter()
+            .find(|model| {
+                normalize(&format!("{model:?}"))
+                    == normalize(effective.model.as_deref().unwrap_or(""))
+            })
+            .ok_or_else(|| PipelineError::Config("Unknown meeting Whisper model".into()))?;
+        let directory = inner
+            .config
+            .whisper_model_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| {
+                PipelineError::Config("Configure a downloaded Whisper model first".into())
+            })?;
+        let path = directory.join(selected.filename());
+        let key = local_provider::local_whisper_cache_key_for_language(
+            &path.to_string_lossy(),
+            effective.language.as_deref(),
+        );
+        let provider = if let Some(provider) = inner.stt_provider_cache.get(&key) {
+            provider.clone()
+        } else {
+            if let Some(message) = local_provider::manual_unloaded_error(
+                "local-whisper",
+                &inner.config.local_whisper_load_mode,
+                false,
+            ) {
+                return Err(PipelineError::Config(message.into()));
+            }
+            let provider: Arc<dyn SttProvider> = Arc::new(
+                crate::stt::LocalWhisperProvider::with_config(crate::stt::LocalWhisperConfig {
+                    model_path: path,
+                    language: effective.language.clone(),
+                    transcription_prompt: inner.config.stt_transcription_prompt.clone(),
+                    ..Default::default()
+                })
+                .map_err(PipelineError::Stt)?,
+            );
+            inner.stt_provider_cache.insert(key, provider.clone());
+            provider
+        };
+        return Ok(ResolvedSttProvider {
+            provider,
+            provider_id: provider_id_used,
+            model: effective.model,
+            language: effective.language,
+            timeout: effective.timeout,
+        });
+    }
+
+    let provider = match get_or_create_resolved_stt_provider(
         inner,
         &provider_id_used,
         effective.model.clone(),
@@ -74,6 +142,12 @@ pub(super) fn resolve_stt_provider_for_transcription(
     ) {
         Ok(provider) => provider,
         Err(err) => {
+            // Explicit per-recording/model selections must not silently use the
+            // dictation provider if their credentials/model are unavailable.
+            if request.forced_provider.is_some() {
+                inner.set_error("The selected transcription provider is unavailable");
+                return Err(err);
+            }
             let global_provider = canonicalize_stt_provider_id(&inner.config.stt_provider);
             let global_provider = resolve_stt_provider_for_runtime(
                 &inner.config,
@@ -168,6 +242,10 @@ fn log_stt_provider_selection(inner: &PipelineInner, provider_id: &str, model: O
 }
 
 pub(super) fn managed_stt_model_supported(provider_id: &str, model: Option<&str>) -> bool {
+    // Transport support is not entitlement: Edge still validates its live catalog.
+    if provider_id == "openai" && model == Some("gpt-4o-transcribe-diarize") {
+        return true;
+    }
     if provider_id != "groq" {
         return false;
     }
@@ -212,6 +290,16 @@ pub(super) fn get_or_create_stt_provider(
 ) -> Result<Arc<dyn SttProvider>, PipelineError> {
     let provider_id =
         resolve_stt_provider_for_runtime(&inner.config, provider_id, model.as_deref());
+    get_or_create_resolved_stt_provider(inner, &provider_id, model, language)
+}
+
+fn get_or_create_resolved_stt_provider(
+    inner: &mut PipelineInner,
+    provider_id: &str,
+    model: Option<String>,
+    language: Option<String>,
+) -> Result<Arc<dyn SttProvider>, PipelineError> {
+    let provider_id = canonicalize_stt_provider_id(provider_id);
     let managed_ready =
         inner.config.managed_inference_enabled && managed_gateway_ready(&inner.config);
     let managed_transport_active = managed_ready

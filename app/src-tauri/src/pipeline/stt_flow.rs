@@ -17,6 +17,7 @@ use super::utils::normalize_stt_text;
 pub(super) struct SttResult {
     /// The transcribed (and normalized) text.
     pub text: String,
+    pub segments: Vec<crate::stt::SpeakerSegment>,
     /// Duration of the STT request in milliseconds.
     pub duration_ms: u64,
     /// Retry/backoff telemetry for this STT request.
@@ -43,7 +44,7 @@ pub(super) async fn run_stt_transcription(
             let provider = stt_provider.clone();
             let wav = wav.clone();
             let format = format.clone();
-            async move { provider.transcribe(wav.as_slice(), &format).await }
+            async move { provider.transcribe_detailed(wav.as_slice(), &format).await }
         })
         .await
     };
@@ -89,11 +90,12 @@ pub(super) async fn run_stt_transcription(
 
     match stt_result {
         Ok(outcome) => match outcome.result {
-            Ok(text) => {
-                let normalized = normalize_stt_text(text);
+            Ok(transcript) => {
+                let normalized = normalize_stt_text(transcript.text);
                 log::info!("{}: STT complete, {} chars", log_prefix, normalized.len());
                 Ok(SttResult {
                     text: normalized,
+                    segments: transcript.segments,
                     duration_ms,
                     retry: outcome.telemetry,
                 })

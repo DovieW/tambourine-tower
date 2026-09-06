@@ -1,18 +1,34 @@
-import { ActionIcon, Badge, Group, Loader, Text, Tooltip } from "@mantine/core";
+import {
+	ActionIcon,
+	Badge,
+	Group,
+	Loader,
+	Menu,
+	Paper,
+	Stack,
+	Text,
+} from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import {
 	Check,
+	ChevronDown,
+	ChevronRight,
 	Copy,
 	FileText,
 	MessageSquare,
-	Pause,
-	Play,
+	MoreHorizontal,
 	RotateCcw,
 	Trash2,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type {
 	GroupedHistoryViewModel,
 	HistoryFeedEmptyState,
 } from "../../lib/history/readModel";
+import { tauriAPI } from "../../lib/tauri";
+import type { RecordingPlayerControls } from "../../lib/useRecordingPlayer";
+import { audioTime } from "./HistoryAudioPlayer";
+import { HistoryReader } from "./HistoryReader";
 
 export function HistoryFeedList({
 	isInitialLoading,
@@ -25,9 +41,7 @@ export function HistoryFeedList({
 	isRetryPending,
 	retryPendingEntryId,
 	recordingExistsById,
-	isRecordingPlaying,
-	isRecordingLoading,
-	onToggleRecording,
+	player,
 	requestLogIds,
 	onJumpToLog,
 	onDeleteEntry,
@@ -43,33 +57,53 @@ export function HistoryFeedList({
 	isRetryPending: boolean;
 	retryPendingEntryId?: string;
 	recordingExistsById: Map<string, { exists: boolean; checkedAt: number }>;
-	isRecordingPlaying: (recordingId: string) => boolean;
-	isRecordingLoading: (recordingId: string) => boolean;
-	onToggleRecording: (recordingId: string) => void;
+	player: RecordingPlayerControls;
 	requestLogIds: Set<string>;
 	onJumpToLog?: (logId: string) => void;
 	onDeleteEntry: (entryId: string) => void;
 	isDeleteDisabled: boolean;
 }) {
-	if (isInitialLoading) {
+	const [expanded, setExpanded] = useState<string | null>(null);
+	const [copying, setCopying] = useState<string | null>(null);
+	const visible = groupedHistory.some((g) =>
+		g.items.some((entry) => entry.id === expanded),
+	);
+	useEffect(() => {
+		if (!visible) {
+			setExpanded(null);
+			player.stop();
+		}
+	}, [visible, player.stop]);
+	const copy = async (id: string) => {
+		setCopying(id);
+		try {
+			const detail = await tauriAPI.getHistoryDetail(id);
+			if (detail)
+				onCopyEntry(id, detail.entry.text || detail.entry.error_message);
+		} catch {
+			notifications.show({
+				color: "red",
+				title: "Copy",
+				message: "Could not load the complete transcript. Please try again.",
+			});
+		} finally {
+			setCopying(null);
+		}
+	};
+	if (isInitialLoading)
 		return (
 			<div className="empty-state">
-				<p className="empty-state-text">Loading history...</p>
+				<Loader size="sm" />
+				<p className="empty-state-text">Loading history…</p>
 			</div>
 		);
-	}
-
-	if (hasError) {
+	if (hasError)
 		return (
 			<div className="empty-state">
-				<p className="empty-state-text" style={{ color: "#ef4444" }}>
-					Failed to load history
-				</p>
+				<Text c="red">Failed to load history</Text>
 			</div>
 		);
-	}
-
-	if (emptyState) {
+	if (emptyState)
 		return (
 			<div className="empty-state">
 				<MessageSquare className="empty-state-icon" />
@@ -77,226 +111,175 @@ export function HistoryFeedList({
 				<p className="empty-state-text">{emptyState.message}</p>
 			</div>
 		);
-	}
-
 	return (
-		<>
+		<Stack gap="lg">
 			{groupedHistory.map((group) => (
-				<div key={group.date} style={{ marginBottom: 24 }}>
-					<p
-						className="section-title"
-						style={{ marginBottom: 12, fontSize: 11 }}
-					>
+				<section key={group.date} aria-label={group.date}>
+					<Text size="xs" c="dimmed" fw={600} mb="xs">
 						{group.date}
-					</p>
-					<div className="history-feed">
+					</Text>
+					<Stack gap="xs">
 						{group.items.map((entry) => {
-							const recordingId = entry.recordingRequestId ?? "";
-							const cached = recordingId
-								? recordingExistsById.get(recordingId)
-								: undefined;
-							const isKnownMissing = !recordingId || cached?.exists === false;
-							const isPlaying = recordingId
-								? isRecordingPlaying(recordingId)
-								: false;
-							const isInProgress = entry.contentKind === "in_progress";
-							const wrapStyle = {
-								whiteSpace: "pre-wrap",
-								overflowWrap: "anywhere",
-								wordBreak: "break-word",
-							} as const;
-
+							const open = expanded === entry.id;
+							const recordingId = entry.recordingRequestId ?? entry.id;
+							const missing =
+								recordingExistsById.get(recordingId)?.exists === false;
+							const busy = entry.contentKind === "in_progress";
 							return (
-								<div key={entry.id} className="history-item">
-									<button
-										type="button"
-										className="history-item-button"
-										onClick={() => onCopyEntry(entry.id, entry.copyValue)}
-										title={entry.hasCopyValue ? "Click to copy" : undefined}
-										disabled={!entry.hasCopyValue}
-									>
-										<span className="history-time">{entry.timestampLabel}</span>
-										<div className="history-text">
-											{entry.contentKind === "in_progress" ? (
-												<Group gap={8} wrap="nowrap" style={{ minWidth: 0 }}>
-													<Loader size="xs" color="orange" />
-													<Text size="sm" c="dimmed" style={{ minWidth: 0 }}>
-														{entry.displayText}
-													</Text>
-												</Group>
-											) : entry.contentKind === "error" ? (
-												<Group
-													gap={8}
-													wrap="nowrap"
-													align="flex-start"
-													style={{ minWidth: 0 }}
-												>
-													<Text size="sm" c="red">
-														Failed
-													</Text>
-													<Text
-														size="sm"
-														c="dimmed"
-														style={{ flex: 1, minWidth: 0, ...wrapStyle }}
-														title={entry.displayTitle}
-													>
-														{entry.displayText}
-													</Text>
-												</Group>
-											) : (
-												<Text
-													size="sm"
-													c={
-														entry.contentKind === "empty" ? "dimmed" : undefined
-													}
-													style={
-														entry.contentKind === "empty"
-															? { ...wrapStyle, fontStyle: "italic" }
-															: wrapStyle
-													}
-													title={entry.displayTitle}
-												>
-													{entry.displayText}
+								<Paper
+									key={entry.id}
+									withBorder
+									radius="md"
+									className="history-card"
+									onClick={(event) => {
+										if (
+											!event.currentTarget.contains(event.target as Node) ||
+											(event.target as HTMLElement).closest(
+												"button, a, input, textarea, [role=menuitem], [data-history-detail]",
+											) ||
+											window.getSelection()?.isCollapsed === false
+										)
+											return;
+										player.stop();
+										setExpanded(open ? null : entry.id);
+									}}
+								>
+									<Group gap="xs" wrap="nowrap" align="flex-start" p="md">
+										<Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+											<button
+												type="button"
+												className="history-card-toggle"
+												aria-expanded={open}
+												aria-controls={`history-detail-${entry.id}`}
+												onClick={() => {
+													player.stop();
+													setExpanded(open ? null : entry.id);
+												}}
+											>
+												{open ? (
+													<ChevronDown size={16} />
+												) : (
+													<ChevronRight size={16} />
+												)}
+												<span>{entry.title || "Voice recording"}</span>
+												<Text component="span" size="xs" c="dimmed">
+													{entry.timestampLabel}
 												</Text>
-											)}
-										</div>
-									</button>
-									<div className="history-actions">
-										{entry.profilePresetLabel ? (
-											<Badge size="xs" variant="light" color="gray">
-												{entry.profilePresetLabel}
-											</Badge>
-										) : null}
-										<Tooltip
-											label={copiedEntryId === entry.id ? "Copied" : "Copy"}
-											withArrow
-										>
-											<ActionIcon
-												variant="subtle"
+												{entry.durationSeconds != null && (
+													<Text component="span" size="xs" c="dimmed">
+														{audioTime(entry.durationSeconds)}
+													</Text>
+												)}
+											</button>
+											<Group gap={6}>
+												{busy ? (
+													<Badge
+														size="xs"
+														variant="light"
+														leftSection={<Loader size={10} />}
+													>
+														Transcribing
+													</Badge>
+												) : entry.contentKind === "error" ? (
+													<Badge size="xs" variant="light" color="red">
+														Failed
+													</Badge>
+												) : (
+													<Badge size="xs" variant="light" color="gray">
+														Saved
+													</Badge>
+												)}
+												{entry.profilePresetLabel && (
+													<Text size="xs" c="dimmed">
+														{entry.profilePresetLabel}
+													</Text>
+												)}
+											</Group>
+											<Text
 												size="sm"
-												color="gray"
-												onClick={(event) => {
-													event.stopPropagation();
-													onCopyEntry(entry.id, entry.copyValue);
-												}}
+												c="dimmed"
+												lineClamp={2}
+												className="history-preview"
+											>
+												{entry.displayText}
+											</Text>
+										</Stack>
+										<Group gap={4} wrap="nowrap">
+											<ActionIcon
+												aria-label="Copy transcript"
+												variant="subtle"
 												disabled={!entry.hasCopyValue}
-												aria-label="Copy"
+												loading={copying === entry.id}
+												onClick={() => void copy(entry.id)}
 											>
-												<span
-													className={
-														"history-copy-icon" +
-														(copiedEntryId === entry.id
-															? " history-copy-icon--checked"
-															: "")
-													}
-												>
-													{copiedEntryId === entry.id ? (
-														<Check size={14} />
-													) : (
-														<Copy size={14} />
+												{copiedEntryId === entry.id ? (
+													<Check size={17} />
+												) : (
+													<Copy size={17} />
+												)}
+											</ActionIcon>
+											<Menu position="bottom-end" withinPortal>
+												<Menu.Target>
+													<ActionIcon
+														aria-label="Recording actions"
+														variant="subtle"
+													>
+														<MoreHorizontal size={18} />
+													</ActionIcon>
+												</Menu.Target>
+												<Menu.Dropdown>
+													<Menu.Item
+														leftSection={<RotateCcw size={15} />}
+														disabled={missing || busy || isRetryPending}
+														onClick={() => onRetryEntry(entry.id)}
+													>
+														{isRetryPending && retryPendingEntryId === entry.id
+															? "Rerunning…"
+															: "Rerun as new result"}
+													</Menu.Item>
+													{onJumpToLog && requestLogIds.has(entry.id) && (
+														<Menu.Item
+															leftSection={<FileText size={15} />}
+															onClick={() => {
+																player.stop();
+																onJumpToLog(entry.id);
+															}}
+														>
+															View request log
+														</Menu.Item>
 													)}
-												</span>
-											</ActionIcon>
-										</Tooltip>
-
-										{!isKnownMissing ? (
-											<Tooltip
-												label={isInProgress ? "Already transcribing" : "Rerun"}
-												withArrow
-											>
-												<ActionIcon
-													variant="subtle"
-													size="sm"
-													color="gray"
-													disabled={isInProgress}
-													loading={
-														isRetryPending && retryPendingEntryId === entry.id
-													}
-													onClick={(event) => {
-														event.stopPropagation();
-														onRetryEntry(entry.id);
-													}}
-													aria-label="Rerun"
-												>
-													<RotateCcw size={14} />
-												</ActionIcon>
-											</Tooltip>
-										) : null}
-
-										<Tooltip
-											label={
-												isKnownMissing
-													? "No recording"
-													: isPlaying
-														? "Pause"
-														: "Play"
-											}
-											withArrow
-										>
-											<ActionIcon
-												variant="subtle"
-												size="sm"
-												color="gray"
-												disabled={isInProgress || isKnownMissing}
-												loading={
-													recordingId ? isRecordingLoading(recordingId) : false
-												}
-												onClick={(event) => {
-													event.stopPropagation();
-													if (!recordingId) return;
-													onToggleRecording(recordingId);
-												}}
-												aria-label={
-													isKnownMissing
-														? "No recording"
-														: isPlaying
-															? "Pause"
-															: "Play"
-												}
-											>
-												{isPlaying ? <Pause size={14} /> : <Play size={14} />}
-											</ActionIcon>
-										</Tooltip>
-
-										{onJumpToLog && requestLogIds.has(entry.id) ? (
-											<Tooltip label="Log" withArrow>
-												<ActionIcon
-													variant="subtle"
-													size="sm"
-													color="gray"
-													onClick={(event) => {
-														event.stopPropagation();
-														onJumpToLog(entry.id);
-													}}
-													aria-label="Log"
-												>
-													<FileText size={14} />
-												</ActionIcon>
-											</Tooltip>
-										) : null}
-
-										<Tooltip label="Delete" withArrow>
-											<ActionIcon
-												variant="subtle"
-												size="sm"
-												color="red"
-												onClick={(event) => {
-													event.stopPropagation();
-													onDeleteEntry(entry.id);
-												}}
-												disabled={isDeleteDisabled}
-												aria-label="Delete"
-											>
-												<Trash2 size={14} />
-											</ActionIcon>
-										</Tooltip>
-									</div>
-								</div>
+													<Menu.Divider />
+													<Menu.Item
+														color="red"
+														leftSection={<Trash2 size={15} />}
+														disabled={isDeleteDisabled || busy}
+														onClick={() => {
+															player.stop();
+															onDeleteEntry(entry.id);
+														}}
+													>
+														Delete
+													</Menu.Item>
+												</Menu.Dropdown>
+											</Menu>
+										</Group>
+									</Group>
+									{open && (
+										<div id={`history-detail-${entry.id}`} data-history-detail>
+											<HistoryReader
+												id={entry.id}
+												recordingId={recordingId}
+												player={player}
+												onCopy={(text) => onCopyEntry(entry.id, text)}
+											/>
+										</div>
+									)}
+								</Paper>
 							);
 						})}
-					</div>
-				</div>
+					</Stack>
+				</section>
 			))}
-		</>
+		</Stack>
 	);
 }

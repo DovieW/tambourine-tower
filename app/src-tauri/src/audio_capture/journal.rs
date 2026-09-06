@@ -9,6 +9,25 @@ const MAGIC: &[u8; 8] = b"KOLPCM01";
 const MAX_SECONDS: u64 = 4 * 60 * 60;
 const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Delete one owned recovery bundle. Keep audio visible when sensitive progress
+/// cannot be removed, and retain its mode until the audio has been removed.
+/// Missing files are harmless so interrupted cleanup can be retried.
+pub fn discard(path: &Path) -> io::Result<()> {
+    for file in [
+        path.with_extension("transcripts"),
+        path.with_extension("progress"),
+        path.to_path_buf(),
+        path.with_extension("options.json"),
+    ] {
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(io::Error::other("Could not remove saved recording files")),
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Journal {
     file: File,
@@ -197,6 +216,28 @@ pub fn read_chunk(path: &Path, start_frame: u64, frames: u32) -> io::Result<(u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discard_removes_only_owned_sidecars_and_preserves_audio_if_progress_cleanup_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recording.pcm");
+        std::fs::write(&path, b"audio").unwrap();
+        std::fs::write(path.with_extension("options.json"), b"options").unwrap();
+        std::fs::create_dir(path.with_extension("transcripts")).unwrap();
+        let unrelated = dir.path().join("another.pcm");
+        std::fs::write(&unrelated, b"other audio").unwrap();
+        assert!(discard(&path).is_err());
+        assert!(path.exists());
+        assert!(path.with_extension("options.json").exists());
+        std::fs::remove_dir(path.with_extension("transcripts")).unwrap();
+        std::fs::write(path.with_extension("transcripts"), b"progress").unwrap();
+        discard(&path).unwrap();
+        discard(&path).unwrap();
+        assert!(!path.exists());
+        assert!(!path.with_extension("transcripts").exists());
+        assert!(!path.with_extension("options.json").exists());
+        assert!(unrelated.exists());
+    }
+
     #[test]
     fn final_transcription_contains_the_entire_recording_and_retains_source() {
         let path = std::env::temp_dir().join(format!("kolboo-final-{}.pcm", uuid::Uuid::new_v4()));

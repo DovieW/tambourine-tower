@@ -852,6 +852,7 @@ pub(super) async fn complete_transcription_flow<C: TranscriptionCallbacks>(
         run_llm_rewrite(ctx, callbacks, stt_text, llm_resolution).await;
 
     TranscriptionResult {
+        speaker_segments: Vec::new(),
         stt_text: stt_text.to_string(),
         final_text,
         stt_duration_ms,

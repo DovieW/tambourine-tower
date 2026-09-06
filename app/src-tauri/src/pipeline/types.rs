@@ -82,9 +82,13 @@ pub enum LlmNotAttemptedReason {
     /// Routed to the implicit "Default" target (no preset), which explicitly disabled rewrite.
     DisabledByDefaultTarget,
     /// Rewrite was enabled, but the provider couldn't be constructed/used.
-    ProviderUnavailable { provider: String, error: String },
+    ProviderUnavailable {
+        provider: String,
+        error: String,
+    },
     /// Fallback for unexpected paths.
     Unknown,
+    MeetingMode,
 }
 
 impl LlmNotAttemptedReason {
@@ -98,6 +102,7 @@ impl LlmNotAttemptedReason {
             LlmNotAttemptedReason::DisabledByDefaultTarget => "disabled_default_target",
             LlmNotAttemptedReason::ProviderUnavailable { .. } => "provider_unavailable",
             LlmNotAttemptedReason::Unknown => "unknown",
+            LlmNotAttemptedReason::MeetingMode => "meeting_mode",
         }
     }
 
@@ -122,6 +127,7 @@ impl LlmNotAttemptedReason {
                 provider, error
             ),
             LlmNotAttemptedReason::Unknown => "reason=unknown".to_string(),
+            LlmNotAttemptedReason::MeetingMode => "reason=meeting_mode".to_string(),
         }
     }
 }
@@ -156,6 +162,7 @@ impl LlmOutcome {
 /// include LLM formatting and/or fallbacks).
 #[derive(Debug, Clone)]
 pub struct TranscriptionResult {
+    pub speaker_segments: Vec<crate::stt::SpeakerSegment>,
     /// Raw transcript as returned from the STT provider (before any LLM formatting).
     pub stt_text: String,
     /// Final output text returned by the pipeline.

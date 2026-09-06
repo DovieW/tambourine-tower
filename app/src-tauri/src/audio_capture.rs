@@ -1394,15 +1394,11 @@ impl AudioCaptureBackend for AudioCapture {
             .map_err(|_| AudioCaptureError::ThreadError("Recovery buffer unavailable".into()))?;
         buffer.journal = None;
         if let Some(path) = buffer.recovery_path.take() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => (),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => {
-                    buffer.recovery_path = Some(path);
-                    return Err(AudioCaptureError::ThreadError(
-                        "Could not discard recovery audio".into(),
-                    ));
-                }
+            if journal::discard(&path).is_err() {
+                buffer.recovery_path = Some(path);
+                return Err(AudioCaptureError::ThreadError(
+                    "Could not discard recovery audio".into(),
+                ));
             }
         }
         Ok(())
@@ -2137,8 +2133,12 @@ mod tests {
             buffer.to_wav_bytes().unwrap();
         }
         assert_eq!(journal::read_chunk(&path, 0, 16000).unwrap().2.len(), 16000);
+        crate::recordings::options::RecordingPreferences::default()
+            .save_journal(&path)
+            .unwrap();
         AudioCaptureBackend::discard_recovery(&mut capture).unwrap();
         assert!(!path.exists());
+        assert!(!path.with_extension("options.json").exists());
         assert!(capture.buffer.lock().unwrap().recovery_path.is_none());
     }
 

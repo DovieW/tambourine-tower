@@ -26,6 +26,47 @@ export interface HistoryEntry {
 	llm_model?: string | null;
 	// Request id of the WAV recording to use for playback/rerun.
 	recording_request_id?: string | null;
+	title?: string | null;
+	duration_seconds?: number | null;
+	recording_mode?: "dictation" | "meeting" | null;
+	speaker_segments?: SpeakerSegment[];
+	original_stt_text?: string | null;
+}
+
+export interface SpeakerSegment {
+	speaker: string;
+	text: string;
+	start_seconds: number;
+	end_seconds: number;
+	part: number;
+}
+export interface RecordingPreferences {
+	mode: "dictation" | "meeting";
+	meeting_model: { provider: string; model: string; use_managed?: boolean } | null;
+}
+
+export interface HistoryEdit {
+	revision: number;
+	title: string | null;
+	text: string | null;
+}
+export interface HistoryEditInput {
+	id: string;
+	expected_revision: number;
+	title: string | null;
+	text: string | null;
+}
+export interface HistoryDetail {
+	entry: HistoryEntry;
+	original_text: string;
+	revision: number;
+	edited: boolean;
+	edit_error: string | null;
+}
+
+export interface RecordingWaveform {
+	duration_seconds: number;
+	peaks: number[];
 }
 
 export type HistoryDeleteMode =
@@ -61,7 +102,7 @@ export interface ModelUsageCount {
 }
 
 export interface HistoryPageResult {
-	items: HistoryEntry[];
+	items: HistorySummary[];
 	totalAll: number;
 	totalFiltered: number;
 	page: number;
@@ -69,6 +110,12 @@ export interface HistoryPageResult {
 	sttModelUsage: ModelUsageCount[];
 	llmModelUsage: ModelUsageCount[];
 }
+
+/** text is a preview; fetch HistoryDetail before copying/exporting a document. */
+export type HistorySummary = Omit<
+	HistoryEntry,
+	"speaker_segments" | "original_stt_text"
+>;
 
 export interface PromptSection {
 	content: string | null;

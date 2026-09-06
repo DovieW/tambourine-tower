@@ -64,7 +64,8 @@ export const BUNDLED_MANAGED_MODELS: ManagedModel[] = [
 export function managedModelsWithBundledFallback(
 	models: ManagedModel[] | null | undefined,
 ): ManagedModel[] {
-	return models && models.length > 0 ? models : BUNDLED_MANAGED_MODELS;
+	// An empty Edge catalog intentionally disables all managed models.
+	return models ?? BUNDLED_MANAGED_MODELS;
 }
 
 export function managedModelByokTarget(
@@ -187,6 +188,10 @@ export const STT_MODELS: Record<string, ModelOption[]> = {
 			label: "GPT-4o Mini Realtime Transcribe",
 		},
 		{ value: "gpt-4o-transcribe", label: "GPT-4o Transcribe" },
+		{
+			value: "gpt-4o-transcribe-diarize",
+			label: "GPT-4o Transcribe · speaker labels",
+		},
 		{ value: "gpt-4o-mini-transcribe", label: "GPT-4o Mini Transcribe" },
 		{ value: "whisper-1", label: "Whisper-1" },
 	],

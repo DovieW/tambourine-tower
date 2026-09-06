@@ -48,6 +48,53 @@ pub use whisper::{
 use async_trait::async_trait;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+pub struct SpeakerSegment {
+    pub speaker: String,
+    pub text: String,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    /// Speaker identity is local to this upload, not the whole meeting.
+    pub part: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SttTranscript {
+    pub text: String,
+    pub segments: Vec<SpeakerSegment>,
+}
+
+pub fn speaker_document(text: &str, segments: &[SpeakerSegment]) -> String {
+    if segments.is_empty() {
+        return text.to_owned();
+    }
+    let multiple_parts = segments.iter().any(|s| s.part != segments[0].part);
+    let mut document = String::new();
+    let mut part = None;
+    for segment in segments {
+        if part != Some(segment.part) {
+            if !document.is_empty() {
+                document.push_str("\n\n");
+            }
+            if multiple_parts {
+                document.push_str(&format!(
+                    "— Part {} · speaker labels restart —\n\n",
+                    segment.part
+                ));
+            }
+            part = Some(segment.part);
+        } else if !document.is_empty() {
+            document.push_str("\n\n");
+        }
+        document.push_str(&format!(
+            "Speaker {}\n{}",
+            segment.speaker,
+            segment.text.trim()
+        ));
+    }
+    document
+}
+
 /// Audio format information for STT processing
 #[derive(Debug, Clone)]
 pub struct AudioFormat {
@@ -111,6 +158,18 @@ pub trait SttProvider: Send + Sync {
     /// # Returns
     /// The transcribed text, or an error if transcription fails
     async fn transcribe(&self, audio: &[u8], format: &AudioFormat) -> Result<String, SttError>;
+
+    /// Providers without speaker metadata retain their existing implementation.
+    async fn transcribe_detailed(
+        &self,
+        audio: &[u8],
+        format: &AudioFormat,
+    ) -> Result<SttTranscript, SttError> {
+        Ok(SttTranscript {
+            text: self.transcribe(audio, format).await?,
+            segments: Vec::new(),
+        })
+    }
 
     /// Get the name of this provider
     #[cfg_attr(not(test), allow(dead_code))]

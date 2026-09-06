@@ -6,6 +6,10 @@ pub trait Fs: Send + Sync + std::fmt::Debug {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
+    /// Private, durable content (transcripts and derived audio data).
+    fn write_private(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        self.write(path, contents)
+    }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
@@ -28,6 +32,20 @@ impl Fs for RealFs {
 
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         fs::write(path, contents)
+    }
+
+    fn write_private(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {

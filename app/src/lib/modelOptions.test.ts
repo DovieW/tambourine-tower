@@ -27,6 +27,9 @@ const models: ManagedModel[] = [
 ];
 
 describe("managed model options", () => {
+	it("respects an empty published catalog", () => {
+		expect(managedModelsWithBundledFallback([])).toEqual([]);
+	});
 	it("keeps managed selection usable when live discovery is unavailable", () => {
 		expect(managedModelsWithBundledFallback(undefined)).toBe(
 			BUNDLED_MANAGED_MODELS,

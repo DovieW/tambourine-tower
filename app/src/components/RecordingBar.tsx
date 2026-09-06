@@ -2,11 +2,12 @@ import {
 	ActionIcon,
 	Alert,
 	Button,
-	Divider,
 	Group,
 	Loader,
+	Modal,
 	Paper,
 	Popover,
+	SegmentedControl,
 	Stack,
 	Switch,
 	Text,
@@ -25,12 +26,33 @@ import {
 import { useEffect, useState } from "react";
 import { formatErrorMessage } from "../lib/formatError";
 import { recordingControlsAPI } from "../lib/tauri/commands";
+import type { RecordingPreferences } from "../lib/tauri/types";
+import { MeetingModelDialog } from "./MeetingModelDialog";
 
 /** Uses the backend pipeline as owner, including recordings started with F3. */
 export function RecordingBar() {
 	const client = useQueryClient();
 	const [computerAudio, setComputerAudio] = useState(false);
 	const [optionsOpen, setOptionsOpen] = useState(false);
+	const [recoveryOpen, setRecoveryOpen] = useState(false);
+	const [modelOpen, setModelOpen] = useState(false);
+	const preferences = useQuery({
+		queryKey: ["recording-preferences"],
+		queryFn: recordingControlsAPI.getPreferences,
+	});
+	const recordingPreferences = preferences.data ?? {
+		mode: "dictation" as const,
+		meeting_model: null,
+	};
+	const savePreferences = useMutation({
+		mutationFn: recordingControlsAPI.setPreferences,
+		onSuccess: (_, value) => {
+			client.setQueryData(["recording-preferences"], value);
+			setModelOpen(false);
+		},
+	});
+	const updatePreferences = (patch: Partial<RecordingPreferences>) =>
+		savePreferences.mutate({ ...recordingPreferences, ...patch });
 	const capability = useQuery({
 		queryKey: ["computer-audio-capability"],
 		queryFn: recordingControlsAPI.computerAudioAvailable,
@@ -44,7 +66,9 @@ export function RecordingBar() {
 	const action = useMutation({
 		mutationFn: async (operation: "start" | "stop" | "cancel") => {
 			if (operation === "start")
-				await recordingControlsAPI.start(computerAudio);
+				await recordingControlsAPI.start(
+					recordingPreferences.mode === "meeting" && computerAudio,
+				);
 			else await recordingControlsAPI[operation]();
 		},
 		onSettled: async () => {
@@ -95,6 +119,8 @@ export function RecordingBar() {
 	});
 	const idle = state.data === "idle" || state.data === "error";
 	const error =
+		preferences.error ??
+		savePreferences.error ??
 		progress.error ??
 		recover.error ??
 		discard.error ??
@@ -106,7 +132,10 @@ export function RecordingBar() {
 
 	const errorMessage = error ? formatErrorMessage(error) : null;
 	useEffect(() => {
-		if (errorMessage) setOptionsOpen(true);
+		if (errorMessage) {
+			setOptionsOpen(false);
+			setRecoveryOpen(true);
+		}
 	}, [errorMessage]);
 	const savedCount = recovery.data?.length ?? 0;
 	const pending = action.isPending || recover.isPending;
@@ -186,18 +215,22 @@ export function RecordingBar() {
 						</span>
 					</Tooltip>
 				) : (
-					<Tooltip label="Record · saved locally until you stop and transcribe">
-						<ActionIcon
-							size={34}
-							variant="filled"
-							radius="xl"
-							aria-label="Record"
-							disabled={state.isError || !idle || discard.isPending}
-							onClick={() => action.mutate("start")}
-						>
-							<Mic size={17} />
-						</ActionIcon>
-					</Tooltip>
+					<ActionIcon
+						size={34}
+						variant="filled"
+						radius="xl"
+						aria-label="Record"
+						disabled={
+							state.isError ||
+							!idle ||
+							discard.isPending ||
+							preferences.isPending ||
+							savePreferences.isPending
+						}
+						onClick={() => action.mutate("start")}
+					>
+						<Mic size={17} />
+					</ActionIcon>
 				)}
 				{(!idle && state.data) || pending ? (
 					<Tooltip label="Cancel">
@@ -241,62 +274,112 @@ export function RecordingBar() {
 					<Popover.Dropdown
 						style={{
 							maxWidth: "calc(100vw - 32px)",
-							maxHeight: "60vh",
-							overflowY: "auto",
 						}}
 					>
 						<Stack gap="sm">
-							{errorMessage ? (
-								<Alert color="red" role="alert">
-									{errorMessage}
-								</Alert>
-							) : null}
-							<Switch
-								label="Computer audio"
-								checked={computerAudio}
-								onChange={(event) =>
-									setComputerAudio(event.currentTarget.checked)
-								}
-								disabled={!idle || !capability.data || pending}
-								description={
-									capability.data ? undefined : "Unavailable on this device"
+							<SegmentedControl
+								aria-label="Recording mode"
+								size="xs"
+								fullWidth
+								data={[
+									{ value: "dictation", label: "Dictation" },
+									{ value: "meeting", label: "Meeting" },
+								]}
+								value={recordingPreferences.mode}
+								disabled={!idle || pending || savePreferences.isPending}
+								onChange={(mode) =>
+									updatePreferences({
+										mode: mode === "meeting" ? "meeting" : "dictation",
+									})
 								}
 							/>
-							{savedCount ? (
+							{recordingPreferences.mode === "meeting" && (
 								<>
-									<Divider />
-									<Text size="sm" fw={600}>
-										Saved recordings ({savedCount})
-									</Text>
+									<Button
+										size="compact-xs"
+										variant="subtle"
+										onClick={() => {
+											setOptionsOpen(false);
+											setModelOpen(true);
+										}}
+										disabled={!idle || pending}
+									>
+										Meeting model
+									</Button>
+									<Switch
+										label="Computer audio"
+										checked={computerAudio}
+										onChange={(event) =>
+											setComputerAudio(event.currentTarget.checked)
+										}
+										disabled={!idle || !capability.data || pending}
+										description={
+											capability.data ? undefined : "Unavailable on this device"
+										}
+									/>
 								</>
-							) : null}
-							{recovery.data?.map((id, index) => (
-								<Stack key={id} gap={4}>
-									<Text size="xs">Saved audio {index + 1}</Text>
-									<Group gap={6}>
-										<Button
-											size="compact-xs"
-											disabled={!idle || pending || discard.isPending}
-											onClick={() => recover.mutate(id)}
-										>
-											Transcribe
-										</Button>
-										<Button
-											size="compact-xs"
-											color="red"
-											variant="subtle"
-											disabled={!idle || pending || discard.isPending}
-											onClick={() => discard.mutate(id)}
-										>
-											Discard
-										</Button>
-									</Group>
-								</Stack>
-							))}
+							)}
+							{savedCount > 0 && (
+								<Button
+									variant="subtle"
+									size="compact-xs"
+									onClick={() => {
+										setOptionsOpen(false);
+										setRecoveryOpen(true);
+									}}
+								>
+									Saved recordings ({savedCount})
+								</Button>
+							)}
 						</Stack>
 					</Popover.Dropdown>
 				</Popover>
 			</Group>
+			{modelOpen && (
+				<MeetingModelDialog
+					preferences={recordingPreferences}
+					onClose={() => setModelOpen(false)}
+					onSave={(value) => savePreferences.mutate(value)}
+					saving={savePreferences.isPending}
+				/>
+			)}
+			<Modal
+				opened={recoveryOpen}
+				onClose={() => setRecoveryOpen(false)}
+				title="Saved recordings"
+				centered
+			>
+				<Stack gap="md">
+					{errorMessage && <Alert color="red">{errorMessage}</Alert>}
+					<Text size="sm" c="dimmed">
+						Audio is saved locally until transcription finishes. Recover or
+						discard interrupted recordings here.
+					</Text>
+					{recovery.data?.map((id, index) => (
+						<Stack key={id} gap={4}>
+							<Text size="xs">Saved audio {index + 1}</Text>
+							<Group gap={6}>
+								<Button
+									size="compact-xs"
+									disabled={!idle || pending || discard.isPending}
+									onClick={() => recover.mutate(id)}
+								>
+									Transcribe
+								</Button>
+								<Button
+									size="compact-xs"
+									color="red"
+									variant="subtle"
+									disabled={!idle || pending || discard.isPending}
+									onClick={() => discard.mutate(id)}
+								>
+									Discard
+								</Button>
+							</Group>
+						</Stack>
+					))}
+				</Stack>
+			</Modal>
 		</Paper>
 	);
 }

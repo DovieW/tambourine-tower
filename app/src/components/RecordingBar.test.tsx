@@ -4,8 +4,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { RecordingBar } from "./RecordingBar";
 
+vi.mock("./MeetingModelDialog", () => ({ MeetingModelDialog: () => null }));
+
 vi.mock("../lib/tauri/commands", () => ({
 	recordingControlsAPI: {
+		getPreferences: vi.fn(),
+		setPreferences: vi.fn(),
 		getSeconds: vi.fn(),
 		canPause: vi.fn(),
 		computerAudioAvailable: vi.fn(),
@@ -29,6 +33,10 @@ function render(state?: string, paused = false, saved: string[] = []) {
 	client.setQueryData(["home-recording-paused"], paused);
 	client.setQueryData(["recording-can-pause"], state === "recording");
 	client.setQueryData(["recording-recovery"], saved);
+	client.setQueryData(["recording-preferences"], {
+		mode: "dictation",
+		meeting_model: null,
+	});
 	return renderToStaticMarkup(
 		<QueryClientProvider client={client}>
 			<MantineProvider>

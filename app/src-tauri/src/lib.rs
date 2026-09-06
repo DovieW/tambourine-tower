@@ -114,6 +114,9 @@ pub use commands::whisper::WhisperModelDownloadStatus;
 pub use commands::whisper::WhisperModelInfo;
 pub use history::HistoryPageQuery;
 pub use history::HistoryPageResult;
+pub use history::{HistoryDetail, HistoryEdit, HistoryEditInput};
+pub use recordings::options::{RecordingMode, RecordingPreferences};
+pub use recordings::RecordingWaveform;
 pub use recordings::RecordingsStats;
 pub use request_log::RequestLog;
 pub use settings::HotkeyConfig;
@@ -1102,6 +1105,8 @@ pub fn run() {
             commands::history::add_history_entry,
             commands::history::get_history,
             commands::history::get_history_page,
+            commands::history::get_history_detail,
+            commands::history::save_history_edit,
             commands::history::delete_history_entry,
             commands::history::get_history_delete_options,
             commands::history::delete_history_entry_ex,
@@ -1150,7 +1155,9 @@ pub fn run() {
             commands::recording::pipeline_retry_transcription,
             // Recording file access (for playback)
             commands::recording::recording_get_wav_path,
-            commands::recording::recording_get_wav_base64,
+            commands::recording::recording_get_waveform,
+            commands::recording::recording_get_preferences,
+            commands::recording::recording_set_preferences,
             // Recording folder helpers
             commands::recording::recordings_open_folder,
             commands::recording::recordings_get_storage_bytes,
