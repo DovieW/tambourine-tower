@@ -48,7 +48,7 @@ tauri = { version = "~2.11.5", default-features = false, features = [
 tauri-utils = "~2.9.3"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-store = "2.4.4"
-tauri-plugin-updater = "~2.10.1"
+tauri-plugin-updater = "~2.11.0"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-cli = "~2.4.1"
 # IMPORTANT: Tauri CLI enforces that the JS package (@tauri-apps/plugin-dialog)
@@ -89,13 +89,13 @@ rodio = { version = "0.22.2", default-features = false, features = [
 ] }
 
 # Audio capture
-cpal = "0.17.3"
+cpal = "0.18.2"
 hound = "3.5"  # WAV encoding
 
 # Voice Activity Detection
 webrtc-vad = "0.4"
-rubato = "1.0"  # High-quality audio resampling
-audioadapter-buffers = "2.0"  # Adapters for rubato 1.x buffer API
+rubato = "5.0"  # High-quality audio resampling
+audioadapter-buffers = "5.2"  # Adapters for rubato 1.x buffer API
 
 # Local Whisper (whisper.cpp bindings) - Optional feature
 whisper-rs = { version = "0.16", optional = true }
@@ -106,7 +106,7 @@ reqwest = { version = "0.13.4", features = ["json", "multipart", "stream"] }
 dotenvy = "0.15"
 
 # Hashing (used for validating downloaded local Whisper model files)
-sha2 = "0.10"
+sha2 = "0.11"
 
 # WebSocket client (Speechmatics realtime STT)
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
@@ -114,7 +114,7 @@ native-tls = { version = "0.2.18", features = ["vendored"] }
 futures-util = "0.3"
 
 # Base64 encoding for audio data
-base64 = "0.22"
+base64 = "0.23"
 
 # Image processing (active-window OCR capture)
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -137,7 +137,7 @@ open = "5.4.1"
 
 # Windows audio control (WASAPI)
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61.3", features = [
+windows = { version = "0.62.2", features = [
     "Win32",
     "ApplicationModel_DataTransfer",
     "Foundation",
